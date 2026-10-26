@@ -6,6 +6,7 @@ Ejecución: python -m app.workers.worker
 from __future__ import annotations
 
 import json
+import signal
 import time
 from typing import Any, Dict, Optional
 
@@ -17,6 +18,7 @@ from app.services import campaigns as campaign_service
 from app.services import queue as send_queue
 from app.services import ses as ses_service
 from app.services import events as events_service
+from app.services import sqs_events
 from app.services import contacts as contact_service
 from app.services.renderer import build_context, render_campaign_email
 from app.core.tokens import click_token, unsubscribe_token
@@ -188,6 +190,8 @@ def run_forever(poll_interval: int = 5) -> None:
     """Bucle principal del worker."""
     setup_logging()
     logger.info("Worker de envío iniciado", extra={"region": settings.AWS_REGION})
+    # Eventos de SES vía SQS (canal privado) en hilo independiente
+    sqs_events.start_consumer()
     while _running:
         try:
             if not redis_ok():
@@ -196,7 +200,7 @@ def run_forever(poll_interval: int = 5) -> None:
                 continue
             # Reintentos vencidos -> cola principal
             send_queue.move_due_retries()
-            mid = send_queue.pop_message(timeout=3)
+            mid = send_queue.pop_message(timeout_seconds=3)
             if not mid:
                 continue
             db = SessionLocal()
@@ -216,4 +220,7 @@ def run_forever(poll_interval: int = 5) -> None:
 
 
 if __name__ == "__main__":
+    # Apagado limpio con SIGTERM (docker stop) y SIGINT
+    signal.signal(signal.SIGTERM, lambda *_: (stop(), sqs_events.stop_consumer()))
+    signal.signal(signal.SIGINT, lambda *_: (stop(), sqs_events.stop_consumer()))
     run_forever()

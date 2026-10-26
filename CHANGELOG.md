@@ -3,6 +3,32 @@
 Todas las cambios notables de HJ Campaigns se documentan aquí.
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y versionado SemVer.
 
+## [1.0.1] — 2026-10-27
+
+Correcciones previas al despliegue en el VPS (reportadas tras clonar `ee845ee`).
+
+### Corregido
+
+- **`scripts/deploy.sh`**: la expresión `SECRET_LEN=${#SECRET_KEY:-0}` producía `bad substitution`; ahora se valida con `${#SECRET_KEY}` tras la carga y se muestran mensajes claros (longitud sin revelar el valor).
+- **`.env` seguro**: ya no se hace `source .env` (ejecutaba cualquier contenido). Nuevo parser en `scripts/lib.sh` que solo acepta `CLAVE=valor` con nombres válidos, recorta comentarios en línea, ignora variables protegidas del shell (`PATH`, `IFS`, …) y rechaza líneas maliciosas sin ejecutarlas.
+- **Redes Docker**: `migrate` (y el resto de servicios backend) quedan explícitamente en la red `hj_internal`; `migrate` ya puede alcanzar a PostgreSQL. Verificado con `docker compose config`.
+- **`worker`**: llamada incorrecta `pop_message(timeout=3)` (la firma real es `timeout_seconds`) que rompería el procesamiento de la cola en cada ciclo.
+- **`scripts/restore.sh`**: error de sintaxis por anidado de comillas en la consulta de terminación de conexiones; además la consulta usaba `current_setting('db')` (inválido) en lugar de `current_database()`.
+- **Healthchecks sin suposiciones**: la imagen del backend instala `curl` explícitamente y falla el build si no estuviera; el frontend usa `node fetch` (sin depender de `wget`); los scripts usan respaldo con Python si `curl` no respondiera.
+- **Backup**: el paquete ahora recibe `chmod 600` real (antes solo se sugería).
+
+### Añadido
+
+- **Eventos SES por SQS (canal privado)**: nuevo consumidor en el worker (long polling saliente, sin endpoint HTTP público) con verificación de firma SNS del sobre, idempotencia, lista blanca de tópicos, descarte de mensajes venenosos y soporte de eventos directos (raw). Script `scripts/setup_ses_events.py` (dry-run por defecto, `--aplicar`) que crea cola + DLQ + tópico + políticas mínimas + destino de eventos en SES de forma idempotente. El webhook HTTP se conserva como alternativa para despliegues con HTTPS.
+- **Credenciales AWS como secretos Docker**: `api`, `worker` y `scheduler` reciben `/root/.aws` montado en `/run/secrets/` (UID 10001, modo 400) preparado por `deploy.sh`; Boto3 lo lee vía `AWS_SHARED_CREDENTIALS_FILE`/`AWS_CONFIG_FILE`/`AWS_PROFILE`. Las variables AWS vacías se sanezan para no romper la cadena de credenciales. Nada de esto entra en el repositorio.
+- **`deploy.sh --check`**: validación completa sin desplegar (config, puertos, secretos, `docker compose config`).
+- Consistencia `DATABASE_URL`/`POSTGRES_PASSWORD` validada en el despliegue (evita el fallo típico de contraseñas desincronizadas).
+
+### Pruebas
+
+- Suite backend: **80 pruebas** (70 previas + 10 nuevas del consumidor SQS), todas en verde con SES y SQS simulados.
+- Scripts verificados con `bash -n` y pruebas funcionales (parser de `.env` ante inyección, variables protegidas, validaciones y secretos).
+
 ## [1.0.0] — 2026-10-26
 
 Primera versión funcional completa.

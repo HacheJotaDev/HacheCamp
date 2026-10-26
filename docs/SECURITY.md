@@ -13,8 +13,9 @@
 | XSS en correos | nh3 con lista blanca de etiquetas/atributos, sin scripts/iframes/eventos, esquemas http/https/mailto; sanitización en guardado y de nuevo por destinatario |
 | Inyección de plantillas | Jinja2 `SandboxedEnvironment`, sin acceso a atributos peligrosos ni globals; validación de sintaxis antes de guardar |
 | Open redirect | Los clics usan URLs firmadas HMAC-SHA256: solo redirige a URLs generadas por el sistema |
-| SSRF | El webhook valida que el certificado SNS venga de hosts `*.amazonaws.com` por HTTPS; las URLs de imágenes/botones requieren host público y bloquean `localhost`/`.local` |
-| Suplantación de eventos SES | Verificación criptográfica obligatoria de la firma SNS (RSA-SHA1 con certificado oficial), token secreto en la URL del webhook, lista blanca opcional de TopicArn |
+| SSRF | El webhook y el consumidor SQS validan que el certificado SNS venga de hosts `*.amazonaws.com` por HTTPS; las URLs de imágenes/botones requieren host público y bloquean `localhost`/`.local` |
+| Suplantación de eventos SES | Verificación criptográfica obligatoria de la firma SNS (RSA-SHA1 con certificado oficial) tanto en el webhook como en la cola SQS, lista blanca opcional de TopicArn, cola SQS con política que solo acepta el tópico del proyecto |
+| Endpoint público de eventos | **No existe por defecto**: los eventos llegan por SQS consumida saliente (long polling); sin puertos ni rutas expuestas a AWS |
 | Reenvíos duplicados | Unicidad (campaña, contacto) en BD, comprobación de estado antes de enviar, estado `incierto` en vez de reenvío ciego tras interrupciones |
 | Envío a no consentidos | Doble filtro (encolado + envío) por estado del contacto y supresión global; campañas promocionales bloqueadas si la dirección está suprimida |
 | Uso no autorizado como spam relay | Aprobación administrativa obligatoria, sin envíos automáticos al desplegar, límites de velocidad y cuota, audit trail |
@@ -34,16 +35,16 @@
 
 1. **Fase de puesta en marcha**: servicios vinculados a `127.0.0.1` (`BIND_IP=127.0.0.1`); administración por túnel SSH (`ssh -L 8085:127.0.0.1:8085`). El login **no** queda expuesto a Internet.
 2. **Publicación**: detrás de proxy inverso con HTTPS (Caddy/Nginx + certificado) o VPN. Configurar entonces `PUBLIC_BASE_URL=https://…`, `API_BASE_URL=https://…` y `COOKIE_SECURE=true`.
-3. El webhook SNS requiere URL pública: publicar **solo** esa ruta vía proxy con HTTPS, o usar un túnel dedicado; su seguridad no depende del transporte (firma + token), pero se recomienda HTTPS.
+3. **Eventos de SES (rebotes/quejas/entregas)**: llegan por SQS que el worker consume **salientemente** (long polling): no se publica ningún endpoint HTTP. La alternativa de webhook HTTP (token + firma) queda reservada para despliegues con HTTPS; su seguridad no depende del transporte, pero se recomienda HTTPS.
 
 ## 4. Gestión de secretos y credenciales
 
 | Secreto | Dónde | Rotación |
 |---|---|---|
 | `SECRET_KEY` (firmas HMAC) | `.env` del proyecto | Con calendario propio; invalida tokens de baja/clic antiguos |
-| Credenciales IAM SES | `.env` (o cadena nativa del host `~/.aws` si se decide montarla como secreto de solo lectura) | Rotación periódica en IAM; usuario dedicado `ses-vps-leisureparts` con permisos solo de SES |
+| Credenciales IAM SES | Recomendado: `/root/.aws` copiado por `deploy.sh` como secreto Docker de solo lectura (`secrets/aws/`, UID 10001, modo 400, fuera del repositorio). Alternativa: `.env` | Rotación periódica en IAM; usuario dedicado `ses-vps-leisureparts`; tras rotar, vuelve a ejecutar `sudo bash scripts/deploy.sh` (o actualiza `.env`) |
 | `POSTGRES_PASSWORD`, claves BD | `.env` | Al rotarla, actualizar `DATABASE_URL` |
-| `WEBHOOK_TOKEN` | `.env` y configuración del tópico SNS | Regenerable sin reenvíos (solo afecta al webhook) |
+| `WEBHOOK_TOKEN` | `.env` y configuración del tópico SNS (solo modalidad webhook HTTPS) | Regenerable sin reenvíos (solo afecta al webhook) |
 
 Reglas: nunca en el repositorio, nunca en logs (`logging_conf` redacta claves cuyo nombre casa con password/token/secret/key…), nunca en el frontend.
 
@@ -61,7 +62,9 @@ La API añade: `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Refe
 
 ## 7. Verificación automatizada
 
-La suite (`backend/tests`) cubre: login y anti-enumeración, bloqueo por fuerza bruta, CSRF obligatorio, roles, Argon2id, MFA con recuperación, importación CSV (duplicados, inválidos, simulación), supresión, flujo completo de campaña con SES simulado, reintentos con backoff, errores permanentes, pausa/reanudación, cancelación, idempotencia, webhook SNS con **firma real RSA** y rechazo de firmas falsas, rebotes permanentes → supresión, quejas → supresión, aperturas/clics firmados, bajas públicas y one-click, y estadísticas.
+La suite (`backend/tests`, 80 pruebas) cubre: login y anti-enumeración, bloqueo por fuerza bruta, CSRF obligatorio, roles, Argon2id, MFA con recuperación, importación CSV (duplicados, inválidos, simulación), supresión, flujo completo de campaña con SES simulado, reintentos con backoff, errores permanentes, pausa/reanudación, cancelación, idempotencia, webhook SNS con **firma real RSA** y rechazo de firmas falsas, consumidor SQS (sobre firmado, eventos directos, duplicados, firma inválida retenida, mensajes venenosos, tópicos no autorizados), rebotes permanentes → supresión, quejas → supresión, aperturas/clics firmados, bajas públicas y one-click, y estadísticas.
+
+Los scripts de despliegue se verifican con `bash -n` y pruebas funcionales: carga de `.env` **sin ejecutarlo** (rechaza líneas maliciosas e ignora variables protegidas del shell), validaciones con mensajes claros (`--check`), coherencia `DATABASE_URL`/`POSTGRES_PASSWORD` y preparación de secretos AWS.
 
 ## 8. Reporte de incidentes
 

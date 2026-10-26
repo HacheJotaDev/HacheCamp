@@ -32,5 +32,7 @@ rm -rf "${DESTINO}"
 # Retención: conserva las 14 más recientes
 ls -1t "${DIR}"/hj_backup_*.tar.gz 2>/dev/null | tail -n +15 | xargs -r rm -f
 
-echo "Copia creada: ${DESTINO}.tar.gz"
-echo "Protege el archivo (contiene secretos): chmod 600 ${DESTINO}.tar.gz"
+# El paquete contiene secretos (.env): restringir permisos de verdad
+chmod 600 "${DESTINO}.tar.gz"
+
+echo "Copia creada: ${DESTINO}.tar.gz (permisos 600 aplicados)"

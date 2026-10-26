@@ -5,10 +5,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 
-# Dependencias del sistema mínimas (psycopg binario no necesita libpq extra)
+# Dependencias del sistema mínimas (psycopg binario no necesita libpq extra).
+# curl se instala EXPLÍCITAMENTE porque el HEALTHCHECK y scripts/deploy.sh lo usan.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && command -v curl >/dev/null   # falla el build si curl no quedara disponible
 
 WORKDIR /app
 

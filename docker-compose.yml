@@ -2,13 +2,20 @@
 # Proyecto independiente: no comparte redes, volúmenes ni puertos con otros proyectos.
 #
 # Puerto público configurable por PORT_FRONTEND (por defecto 127.0.0.1:8085).
-# PostgreSQL y Redis NO exponen puertos: solo red interna.
+# PostgreSQL y Redis NO exponen puertos: solo red interna hj_campaigns_internal.
+#
+# Credenciales de AWS (SES/SQS): los servicios api, worker y scheduler reciben
+# los archivos ~/.aws del VPS como secretos Docker (solo lectura, ver
+# scripts/deploy.sh → preparar_secretos_aws). Nunca van en el repositorio.
 
 name: hj-campaigns
 
 x-backend: &backend
   build: ./backend
   env_file: .env
+  # Red interna compartida: imprescindible para llegar a postgres y redis.
+  # (Todos los servicios backend heredan esto; 'migrate' incluido.)
+  networks: [hj_internal]
   depends_on:
     postgres:
       condition: service_healthy
@@ -18,6 +25,26 @@ x-backend: &backend
   logging:
     driver: json-file
     options: { max-size: "10m", max-file: "3" }
+
+# Credenciales AWS montadas como secretos de solo lectura (api, worker y scheduler)
+x-aws: &aws
+  environment:
+    # Boto3 lee los archivos de credenciales apuntados por estas variables
+    AWS_SHARED_CREDENTIALS_FILE: /run/secrets/aws_credentials
+    AWS_CONFIG_FILE: /run/secrets/aws_config
+    AWS_PROFILE: ${AWS_PROFILE:-default}
+    AWS_DEFAULT_REGION: ${AWS_REGION:-us-east-2}
+  secrets:
+    - aws_credentials
+    - aws_config
+
+secrets:
+  # Los archivos los prepara scripts/deploy.sh (copiados de /root/.aws con
+  # propietario UID 10001 y modo 400). No contienen nada si no hay credenciales.
+  aws_credentials:
+    file: ./secrets/aws/credentials
+  aws_config:
+    file: ./secrets/aws/config
 
 services:
   # ------------------------------------------------------------------ base de datos
@@ -73,12 +100,13 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    # La red hj_internal ya viene del ancla x-backend (necesaria para PostgreSQL)
     healthcheck:
       disable: true
 
   # ------------------------------------------------------------------ API
   api:
-    <<: *backend
+    <<: [*backend, *aws]
     depends_on:
       postgres:
         condition: service_healthy
@@ -89,7 +117,6 @@ services:
     ports:
       # Solo local por defecto: publicar vía proxy inverso con HTTPS cuando proceda
       - "${BIND_IP:-127.0.0.1}:${PORT_API:-8086}:8000"
-    networks: [hj_internal]
     deploy:
       resources:
         limits:
@@ -97,7 +124,7 @@ services:
 
   # ------------------------------------------------------------------ worker de envío
   worker:
-    <<: *backend
+    <<: [*backend, *aws]
     command: ["python", "-m", "app.workers.worker"]
     depends_on:
       postgres:
@@ -106,7 +133,6 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
-    networks: [hj_internal]
     deploy:
       resources:
         limits:
@@ -114,7 +140,7 @@ services:
 
   # ------------------------------------------------------------------ scheduler
   scheduler:
-    <<: *backend
+    <<: [*backend, *aws]
     command: ["python", "-m", "app.workers.scheduler"]
     depends_on:
       postgres:
@@ -123,7 +149,6 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
-    networks: [hj_internal]
     deploy:
       resources:
         limits:

@@ -26,6 +26,11 @@ logger = get_logger("hj.events")
 
 AMAZON_SUFFIXES = (".amazonaws.com", ".amazon.com")
 
+# Caché de certificados de firma SNS (evita descargar el certificado en cada
+# notificación; necesario para volúmenes altos vía SQS).
+_CERT_CACHE: Dict[str, Tuple[bytes, float]] = {}
+_CERT_TTL_SEGUNDOS = 3600.0
+
 
 class SNSSecurityError(ValueError):
     pass
@@ -47,6 +52,19 @@ def _safe_fetch(url: str, max_bytes: int = 65536) -> bytes:
     req = urllib.request.Request(url, method="GET")
     with urllib.request.urlopen(req, timeout=10) as resp:  # nosec: hosts restringidos
         return resp.read(max_bytes)
+
+
+def _certificado_firmante(url: str, max_age: float = _CERT_TTL_SEGUNDOS) -> bytes:
+    """Descarga (con caché temporal) el certificado de firma de Amazon."""
+    import time
+    cached = _CERT_CACHE.get(url)
+    if cached:
+        der, expira = cached
+        if time.time() < expira:
+            return der
+    der = _safe_fetch(url)
+    _CERT_CACHE[url] = (der, time.time() + max_age)
+    return der
 
 
 def _canonical_string(sns: Dict[str, Any], keys: list) -> str:
@@ -86,7 +104,7 @@ def verify_sns_signature(sns: Dict[str, Any]) -> None:
     from cryptography.hazmat.primitives.asymmetric import padding
 
     try:
-        cert_der = _safe_fetch(cert_url)
+        cert_der = _certificado_firmante(cert_url)
         from cryptography import x509
         cert = x509.load_der_x509_certificate(cert_der)
         public_key = cert.public_key()

@@ -28,7 +28,10 @@ def main() -> int:
     quota = ses_service.get_sending_quota()
     if quota.get("error"):
         print(f"✗ No se pudo consultar la cuota: {quota['error']}")
-        print("  Revisa las credenciales IAM (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY)")
+        print("  Credenciales no válidas. Revisa:")
+        print("   - el secreto montado (/run/secrets/aws_credentials, perfil '" + settings.AWS_PROFILE + "') o")
+        print("   - AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY en .env")
+        print("  Diagnóstico rápido: docker compose exec api python -c \"import botocore.session; s=botocore.session.get_session(); print(s.get_credentials().access_key[:6] + '...' if s.get_credentials() else 'SIN CREDENCIALES')\"")
         return 1
     print(f"✓ Cuota 24 h: {quota['sent_last_24h']} / {quota['max_24h']}")
     print(f"✓ Máximo por segundo: {quota['max_per_second']}")

@@ -2,6 +2,9 @@
 .env
 .env.*
 !.env.example
+# Credenciales AWS preparadas por scripts/deploy.sh (nunca en el repo)
+secrets/
+.aws/
 
 # Python
 __pycache__/
@@ -9,6 +12,8 @@ __pycache__/
 .venv/
 venv/
 *.db
+*.db-shm
+*.db-wal
 *.sqlite3
 .pytest_cache/
 .coverage

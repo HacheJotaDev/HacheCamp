@@ -2,15 +2,38 @@
 
 Todos los valores pueden sobrescribirse por variables de entorno o archivo .env.
 Los secretos NUNCA se incluyen en el repositorio.
+
+Credenciales de AWS (SES/SQS): Boto3 resuelve su cadena habitual
+  1. Variables de entorno AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY (opcional),
+  2. Archivo compartido apuntado por AWS_SHARED_CREDENTIALS_FILE/AWS_CONFIG_FILE
+     (en Docker: secretos montados en /run/secrets, recomendado en el VPS).
+Una variable de entorno VACÍA rompería esa cadena, por eso se sanea abajo.
 """
 from __future__ import annotations
 
+import os
 import secrets
 from functools import lru_cache
 from typing import List, Optional
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _limpiar_aws_env_vacias() -> None:
+    """Elimina variables AWS de entorno vacías (p. ej. AWS_ACCESS_KEY_ID='')
+
+    Un valor vacío cuenta como 'credencial presente' para botocore y anula el
+    resto de la cadena (archivo compartido/perfil), provocando fallos de auth.
+    Con este saneamiento, si el .env las trae vacías, Boto3 usa el archivo
+    de credenciales montado como secreto.
+    """
+    for var in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"):
+        if os.environ.get(var, "") == "":
+            os.environ.pop(var, None)
+
+
+_limpiar_aws_env_vacias()
 
 
 class Settings(BaseSettings):
@@ -43,12 +66,21 @@ class Settings(BaseSettings):
 
     # --- Amazon SES ---------------------------------------------------------
     AWS_REGION: str = "us-east-2"           # Región obligatoria del proyecto
-    AWS_ACCESS_KEY_ID: Optional[str] = None  # Preferible: cadena de credenciales IAM del host
+    AWS_ACCESS_KEY_ID: Optional[str] = None  # Opcional: preferible archivo de credenciales (secreto)
     AWS_SECRET_ACCESS_KEY: Optional[str] = None
+    AWS_PROFILE: str = "default"             # Perfil dentro del archivo de credenciales
     SES_CONFIGURATION_SET: Optional[str] = None
     SES_CONTACT_LIST: Optional[str] = None   # ListManagementOptions opcional
     SES_MAX_PER_SECOND: Optional[int] = None  # Límite propio; si no, usa el de SES
     SES_RETRIES_MAX: int = 4
+
+    # --- Eventos de SES por SQS (canal privado, sin endpoint público) -------
+    # Si AWS_SQS_EVENTS_QUEUE_URL está definida, el worker consume la cola.
+    AWS_SQS_EVENTS_QUEUE_URL: Optional[str] = None
+    SQS_WAIT_SECONDS: int = 20               # Long polling (máx. 20 s)
+    SQS_MAX_MESSAGES: int = 10               # Lote por recepción (máx. 10)
+    SQS_MAX_RECEIVE_COUNT: int = 5           # Mensaje venenoso: se descarta tras N lecturas
+    SQS_VERIFY_SNS_SIGNATURE: bool = True    # Verificar firma SNS del sobre
 
     # --- URLs públicas -------------------------------------------------------
     PUBLIC_BASE_URL: str = "http://127.0.0.1:8085"   # URL pública del frontend
@@ -75,6 +107,14 @@ class Settings(BaseSettings):
     def _secret_key(cls, v: str) -> str:
         if v and len(v) < 32:
             raise ValueError("SECRET_KEY debe tener al menos 32 caracteres")
+        return v
+
+    @field_validator("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SQS_EVENTS_QUEUE_URL", mode="before")
+    @classmethod
+    def _cadena_vacia_a_none(cls, v):
+        """Trata cadenas vacías como ausentes (evita credenciales inválidas)."""
+        if isinstance(v, str) and v.strip() == "":
+            return None
         return v
 
     _dev_secret: str = ""  # caché interna (se excluye del modelo pydantic)

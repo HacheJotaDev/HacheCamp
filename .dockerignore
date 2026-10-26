@@ -2,11 +2,15 @@
 .env
 .env.*
 !.env.example
+secrets
+.aws
 **/__pycache__
 **/.venv
 **/node_modules
 **/.next
 **/*.db
+**/*.db-shm
+**/*.db-wal
 **/*.log
 **/.pytest_cache
 backups
