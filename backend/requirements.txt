@@ -1,0 +1,19 @@
+# HJ Campaigns - dependencias de ejecución (Python 3.12)
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.30,<1.0
+gunicorn>=22.0
+sqlalchemy>=2.0,<2.1
+alembic>=1.13,<2.0
+psycopg[binary]>=3.2,<4.0
+pydantic>=2.7,<3.0
+pydantic-settings>=2.3,<3.0
+argon2-cffi>=23.1
+pyotp>=2.9
+boto3>=1.34
+redis>=5.0,<6.0
+fakeredis>=2.23
+nh3>=0.2
+jinja2>=3.1
+python-multipart>=0.0.9
+html2text>=2024.2.26
+cryptography>=42.0

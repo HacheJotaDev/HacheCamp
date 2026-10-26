@@ -1,0 +1,35 @@
+# Secretos y configuración local
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.db
+*.sqlite3
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+*.log
+npm-debug.log*
+
+# Sistema
+.DS_Store
+Thumbs.db
+
+# Copias de seguridad locales
+backups/
+*.sql.gz
+*.tar.gz
+
+# IDE
+.idea/
+.vscode/

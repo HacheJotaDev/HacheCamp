@@ -1,0 +1,219 @@
+"""Worker de envío: procesa la cola con control de velocidad, reintentos
+con backoff exponencial, idempotencia y recuperación tras reinicios.
+
+Ejecución: python -m app.workers.worker
+"""
+from __future__ import annotations
+
+import json
+import time
+from typing import Any, Dict, Optional
+
+from app.core.config import settings
+from app.core.db import SessionLocal, utcnow
+from app.core.logging_conf import get_logger, setup_logging
+from app.models import Campaign, CampaignMessage, Contact
+from app.services import campaigns as campaign_service
+from app.services import queue as send_queue
+from app.services import ses as ses_service
+from app.services import events as events_service
+from app.services import contacts as contact_service
+from app.services.renderer import build_context, render_campaign_email
+from app.core.tokens import click_token, unsubscribe_token
+from app.workers.redis_client import redis_ok
+
+logger = get_logger("hj.worker")
+
+_running = True
+
+
+def stop() -> None:
+    global _running
+    _running = False
+
+
+def _render_and_send(db, msg: CampaignMessage, campaign: Campaign) -> str:
+    """Renderiza el mensaje para el contacto y lo envía. Devuelve MessageId SES."""
+    contact = db.get(Contact, msg.contact_id)
+    if not contact:
+        raise ValueError(f"Contacto inexistente {msg.contact_id}")
+
+    unsub_token = unsubscribe_token(contact.id, campaign.id)
+    unsub_url = f"{settings.PUBLIC_BASE_URL.rstrip('/')}/baja?token={unsub_token}"
+    unsub_post = f"{settings.API_BASE_URL.rstrip('/')}/api/v1/public/unsubscribe/one-click?token={unsub_token}"
+    context = build_context(
+        contact={
+            "email": contact.email, "first_name": contact.first_name,
+            "last_name": contact.last_name, "attributes": contact.attributes,
+        },
+        campaign={"name": campaign.name, "subject": campaign.subject},
+        unsubscribe_url=unsub_url,
+    )
+
+    def signer(url: str) -> str:
+        tok = click_token(campaign.id, msg.id, url)
+        return f"{settings.API_BASE_URL.rstrip('/')}/api/v1/t/click/{tok}"
+
+    subject, html_final, plain = render_campaign_email(
+        mode=campaign.mode,
+        blocks=campaign.blocks,
+        html_source=campaign.html,
+        subject=campaign.subject,
+        context=context,
+        click_signer=signer if campaign.category == "promocional" else None,
+    )
+
+    raw = ses_service.build_raw_message(
+        from_email=campaign.from_email, from_name=campaign.from_name,
+        to_email=msg.email, subject=subject, html=html_final, text=plain,
+        reply_to=campaign.reply_to,
+        unsubscribe_url=unsub_url if campaign.category == "promocional" else None,
+        unsubscribe_post_url=unsub_post if campaign.category == "promocional" else None,
+        campaign_id=campaign.id, message_id=msg.id, category=campaign.category,
+    )
+    return ses_service.send_raw_email(raw)
+
+
+def process_one(db, mid: str) -> Dict[str, Any]:
+    """Procesa un trabajo de envío. Devuelve resultado para métricas del ciclo."""
+    msg = db.get(CampaignMessage, mid)
+    if not msg:
+        return {"accion": "descartado", "motivo": "mensaje_inexistente"}
+
+    campaign = db.get(Campaign, msg.campaign_id)
+    if not campaign:
+        return {"accion": "descartado", "motivo": "campana_inexistente"}
+
+    # Pausa: reencolar con retardo corto
+    if campaign.status == "pausada":
+        delay = send_queue.schedule_retry(mid, 1)
+        return {"accion": "reencolado", "motivo": "campana_pausada", "espera": delay}
+    # Cancelada: el mensaje pendiente queda cancelado
+    if campaign.status == "cancelada":
+        if msg.status == "pendiente":
+            msg.status = "cancelado"
+        return {"accion": "cancelado"}
+    # Estados que no requieren envío
+    if campaign.status in ("completada", "fallida"):
+        if msg.status == "pendiente":
+            msg.status = "cancelado"
+        return {"accion": "cancelado", "motivo": "campana_finalizada"}
+
+    # Idempotencia: si ya fue aceptado/entregado, no reenviar
+    if msg.status not in ("pendiente", "incierto", "rebote_temporal"):
+        return {"accion": "omitido", "motivo": f"estado_{msg.status}"}
+
+    # Supresión: bloqueo de nuevos envíos a contactos suprimidos
+    if contact_service.is_suppressed(db, msg.email):
+        msg.status = "cancelado"
+        msg.last_error = "Contacto en lista de supresión"
+        return {"accion": "cancelado", "motivo": "supresion"}
+
+    # Transición a enviando (persistente)
+    msg.status = "enviando"
+    msg.attempts += 1
+    db.commit()
+
+    # Control de velocidad (respeta cuota SES)
+    send_queue.wait_for_rate_slot(ses_service.effective_rate_per_second())
+
+    try:
+        ses_message_id = _render_and_send(db, msg, campaign)
+    except ses_service.SESError as exc:
+        if exc.retryable and msg.attempts < settings.RETRY_MAX_ATTEMPTS:
+            msg.status = "pendiente"
+            msg.last_error = exc.detail
+            delay = send_queue.schedule_retry(msg.id, msg.attempts)
+            db.commit()
+            return {"accion": "reintento_programado", "espera": delay, "error": exc.detail}
+        msg.status = "error"
+        msg.last_error = exc.detail
+        db.commit()
+        campaign_service.check_campaign_completion(db, campaign)
+        db.commit()
+        return {"accion": "error", "tipo": exc.kind, "detalle": exc.detail}
+    except Exception as exc:
+        # Error inesperado: reintento si quedan intentos
+        if msg.attempts < settings.RETRY_MAX_ATTEMPTS:
+            msg.status = "pendiente"
+            msg.last_error = f"error_interno: {type(exc).__name__}"
+            delay = send_queue.schedule_retry(msg.id, msg.attempts)
+            db.commit()
+            return {"accion": "reintento_programado", "espera": delay, "error": type(exc).__name__}
+        msg.status = "error"
+        msg.last_error = f"error_interno: {type(exc).__name__}"
+        db.commit()
+        return {"accion": "error", "tipo": "interno"}
+
+    # Éxito: SES aceptó el mensaje
+    msg.status = "aceptado"
+    msg.ses_message_id = ses_message_id
+    msg.sent_at = utcnow()
+    msg.last_error = None
+    if campaign.status == "en_cola":
+        campaign_service.transition(campaign, "enviando")
+    db.commit()
+
+    events_service.record_event(
+        db, type="envio_local", event_uid=f"local:{msg.id}:{msg.attempts}",
+        campaign_id=campaign.id, message_id=msg.id, ses_message_id=ses_message_id,
+        email=msg.email,
+    )
+    db.commit()
+    campaign_service.check_campaign_completion(db, campaign)
+    db.commit()
+    return {"accion": "enviado", "ses_message_id": ses_message_id}
+
+
+def reconcile_stale_sends(db) -> int:
+    """Marca como 'incierto' los mensajes 'enviando' antiguos (posible pérdida
+    de respuesta de SES tras una interrupción). Requiere reconciliación manual."""
+    threshold = utcnow().timestamp() - settings.STALE_SENDING_MINUTES * 60
+    stale = (
+        db.query(CampaignMessage)
+        .filter(CampaignMessage.status == "enviando",
+                CampaignMessage.updated_at < utcnow().fromtimestamp(threshold, tz=utcnow().tzinfo))
+        .all()
+    )
+    for msg in stale:
+        msg.status = "incierto"
+        msg.last_error = "Interrumpido tras el envío; resultado desconocido. Reconciliar manualmente."
+    if stale:
+        db.commit()
+        logger.warning("Mensajes marcados como inciertos", extra={"cantidad": len(stale)})
+    return len(stale)
+
+
+def run_forever(poll_interval: int = 5) -> None:
+    """Bucle principal del worker."""
+    setup_logging()
+    logger.info("Worker de envío iniciado", extra={"region": settings.AWS_REGION})
+    while _running:
+        try:
+            if not redis_ok():
+                logger.error("Redis no disponible; reintentando en 5s")
+                time.sleep(poll_interval)
+                continue
+            # Reintentos vencidos -> cola principal
+            send_queue.move_due_retries()
+            mid = send_queue.pop_message(timeout=3)
+            if not mid:
+                continue
+            db = SessionLocal()
+            try:
+                result = process_one(db, mid)
+                if result.get("accion") == "reencolado":
+                    time.sleep(min(result.get("espera", 30), 30))
+                logger.info("Trabajo procesado", extra={"resultado": json.dumps(result)[:400]})
+            finally:
+                db.close()
+        except KeyboardInterrupt:
+            logger.info("Worker detenido por señal")
+            break
+        except Exception as exc:
+            logger.error("Error en ciclo del worker", extra={"error": type(exc).__name__})
+            time.sleep(poll_interval)
+
+
+if __name__ == "__main__":
+    run_forever()

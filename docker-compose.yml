@@ -1,0 +1,165 @@
+# HJ Campaigns — Docker Compose de producción
+# Proyecto independiente: no comparte redes, volúmenes ni puertos con otros proyectos.
+#
+# Puerto público configurable por PORT_FRONTEND (por defecto 127.0.0.1:8085).
+# PostgreSQL y Redis NO exponen puertos: solo red interna.
+
+name: hj-campaigns
+
+x-backend: &backend
+  build: ./backend
+  env_file: .env
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options: { max-size: "10m", max-file: "3" }
+
+services:
+  # ------------------------------------------------------------------ base de datos
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-hj_campaigns}
+      POSTGRES_USER: ${POSTGRES_USER:-hj}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Define POSTGRES_PASSWORD en .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-hj} -d ${POSTGRES_DB:-hj_campaigns}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    # Sin ports: accesible solo desde la red interna
+    networks: [hj_internal]
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks: [hj_internal]
+    logging:
+      driver: json-file
+      options: { max-size: "5m", max-file: "3" }
+    deploy:
+      resources:
+        limits:
+          memory: 384m
+
+  # ------------------------------------------------------------------ migraciones (one-shot)
+  migrate:
+    <<: *backend
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      disable: true
+
+  # ------------------------------------------------------------------ API
+  api:
+    <<: *backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      # Solo local por defecto: publicar vía proxy inverso con HTTPS cuando proceda
+      - "${BIND_IP:-127.0.0.1}:${PORT_API:-8086}:8000"
+    networks: [hj_internal]
+    deploy:
+      resources:
+        limits:
+          memory: 768m
+
+  # ------------------------------------------------------------------ worker de envío
+  worker:
+    <<: *backend
+    command: ["python", "-m", "app.workers.worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    networks: [hj_internal]
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+
+  # ------------------------------------------------------------------ scheduler
+  scheduler:
+    <<: *backend
+    command: ["python", "-m", "app.workers.scheduler"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    networks: [hj_internal]
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+
+  # ------------------------------------------------------------------ frontend
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        API_INTERNAL_URL: http://api:8000
+    environment:
+      API_INTERNAL_URL: http://api:8000
+    ports:
+      # Dirección pública configurable (por defecto solo localhost:8085)
+      - "${BIND_IP:-127.0.0.1}:${PORT_FRONTEND:-8085}:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    networks: [hj_internal]
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+
+volumes:
+  pgdata:
+    name: hj_campaigns_pgdata
+  redisdata:
+    name: hj_campaigns_redisdata
+
+networks:
+  hj_internal:
+    name: hj_campaigns_internal
+    driver: bridge
