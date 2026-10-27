@@ -28,6 +28,7 @@ from app.schemas import (
     RecipientsPreview,
 )
 from app.services import campaigns as campaign_service
+from app.services import mail_config
 from app.services import ses as ses_service
 from app.services.renderer import (
     html_to_plain_text,
@@ -203,19 +204,23 @@ def scheduled_history(db: Session = Depends(get_db), user: User = Depends(get_cu
 def _resolver_remitente(db: Session, payload: CampaignCreate) -> tuple[str, str]:
     """Remitente automático: usa el configurado por defecto salvo override.
 
-    Fuentes: ajustes de aplicación (default_from_name/default_from_email),
-    con fallback a las constantes del proyecto.
+    Fuentes: "Configuración de correo" (app_settings: default_from_name /
+    default_from_email), con fallback a las constantes del proyecto.
+    El correo del remitente debe pertenecer al dominio verificado en SES.
     """
-    from app.models import AppSetting
-
-    stored = {s.key: (s.value or {}).get("valor") for s in db.query(AppSetting).all()}
-    from_name = payload.from_name or stored.get("default_from_name") or "HJ Campaigns"
-    from_email = payload.from_email or stored.get("default_from_email") or \
-        "notificaciones@leisureparts4u.store"
+    guardado = mail_config.leer_guardado(db)
+    from_name = (payload.from_name or "").strip() or \
+        guardado[mail_config.KEY_FROM_NAME] or mail_config.DEFAULT_FROM_NAME
+    from_email = (payload.from_email or "").strip() or \
+        guardado[mail_config.KEY_FROM_EMAIL] or mail_config.DEFAULT_FROM_EMAIL
     if not contact_service.is_valid_email(from_email):
         raise HTTPException(status.HTTP_400_BAD_REQUEST,
                             f"El remitente por defecto no es un correo válido: {from_email}")
-    return from_name, contact_service.normalize_email(from_email)
+    try:
+        from_email = mail_config.validar_from_email(from_email)
+    except mail_config.MailConfigError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc))
+    return from_name, from_email
 
 
 @router.post("", response_model=CampaignDetailOut, status_code=201)
@@ -227,6 +232,16 @@ def create_campaign(payload: CampaignCreate, request: Request,
                             "Debe seleccionar una lista o un segmento de destinatarios")
 
     from_name, from_email = _resolver_remitente(db, payload)
+
+    # Asunto: el propio de la campaña tiene prioridad (nunca se sobrescribe);
+    # si se omite, se usa el asunto predeterminado de "Configuración de correo".
+    subject = (payload.subject or "").strip()
+    if not subject:
+        subject = mail_config.config_efectiva(db)["subject"]
+    if not subject:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            "El asunto es obligatorio: indícalo o define un asunto "
+                            "predeterminado en 'Configuración de correo'")
 
     blocks = None
     html = None
@@ -241,7 +256,7 @@ def create_campaign(payload: CampaignCreate, request: Request,
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc))
 
     campaign = Campaign(
-        name=payload.name, subject=payload.subject,
+        name=payload.name, subject=subject,
         from_name=from_name, from_email=from_email,
         reply_to=payload.reply_to, template_id=payload.template_id,
         mode=payload.mode, blocks=blocks, html=html, plain_text=plain_text,

@@ -332,10 +332,12 @@ class PreviewRequest(BaseModel):
 
 class SendTestRequest(BaseModel):
     to_email: str
-    from_email: str
-    from_name: str = "HJ Campaigns"
+    # Remitente y asunto opcionales: si se omiten se usan los valores de
+    # "Configuración de correo" (no hace falta reintroducirlos).
+    from_email: Optional[str] = None
+    from_name: Optional[str] = None
     reply_to: Optional[str] = None
-    subject: str = "[Prueba] HJ Campaigns"
+    subject: Optional[str] = None
     mode: str = Field(default="bloques", pattern="^(bloques|html)$")
     blocks: Optional[List[Dict[str, Any]]] = None
     html: Optional[str] = None
@@ -349,6 +351,16 @@ class SendTestRequest(BaseModel):
             raise ValueError("Correo inválido")
         return normalize_email(v)
 
+    @field_validator("from_name", "subject")
+    @classmethod
+    def _sin_saltos_linea(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        v = v.strip()
+        if "\r" in v or "\n" in v:
+            raise ValueError("No puede contener saltos de línea")
+        return v or None
+
 
 # --------------------------------------------------------------------------- #
 # Campañas
@@ -357,7 +369,9 @@ class SendTestRequest(BaseModel):
 
 class CampaignCreate(BaseModel):
     name: str = Field(min_length=2, max_length=160)
-    subject: str = Field(min_length=1, max_length=255)
+    # Asunto opcional: si se omite, se usa el asunto predeterminado de
+    # "Configuración de correo" (ver create_campaign).
+    subject: Optional[str] = Field(default=None, max_length=255)
     # Remitente opcional: si se omite se usa el configurado por defecto
     from_name: Optional[str] = Field(default=None, max_length=120)
     from_email: Optional[str] = None
@@ -380,6 +394,26 @@ class CampaignCreate(BaseModel):
         if not is_valid_email(v):
             raise ValueError("Correo inválido")
         return normalize_email(v)
+
+    @field_validator("subject")
+    @classmethod
+    def _subject_seguro(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        v = v.strip()
+        if "\r" in v or "\n" in v:
+            raise ValueError("El asunto no puede contener saltos de línea")
+        return v or None
+
+    @field_validator("from_name")
+    @classmethod
+    def _from_name_seguro(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        v = v.strip()
+        if "\r" in v or "\n" in v:
+            raise ValueError("El nombre del remitente no puede contener saltos de línea")
+        return v or None
 
 
 class CampaignUpdate(BaseModel):
@@ -407,6 +441,24 @@ class CampaignUpdate(BaseModel):
         if not is_valid_email(v):
             raise ValueError("Correo inválido")
         return normalize_email(v)
+
+    @field_validator("subject")
+    @classmethod
+    def _subject_seguro(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        if "\r" in v or "\n" in v:
+            raise ValueError("El asunto no puede contener saltos de línea")
+        return v
+
+    @field_validator("from_name")
+    @classmethod
+    def _from_name_seguro(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        if "\r" in v or "\n" in v:
+            raise ValueError("El nombre del remitente no puede contener saltos de línea")
+        return v
 
 
 class CampaignOut(ORMModel):

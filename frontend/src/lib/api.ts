@@ -258,6 +258,19 @@ export interface Paged<T> {
   por_estado?: Record<string, number>;
 }
 
+/** Configuración de correo (remitente y asunto predeterminados). */
+export interface MailConfig {
+  from_name: string;
+  from_email: string;
+  subject: string;
+  dominio: string;
+  guardado: {
+    default_from_name: string | null;
+    default_from_email: string | null;
+    default_subject: string | null;
+  };
+}
+
 export interface DashboardData {
   resumen: Record<string, number>;
   metricas?: {

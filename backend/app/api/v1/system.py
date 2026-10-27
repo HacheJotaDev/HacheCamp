@@ -12,6 +12,7 @@ from app.core.config import settings
 from app.core.db import get_db
 from app.core.deps import get_current_user, require_admin
 from app.models import AppSetting, AuditLog, User
+from app.services import mail_config
 from app.services import ses as ses_service
 from app.workers.redis_client import redis_ok
 
@@ -21,6 +22,7 @@ router = APIRouter(tags=["Sistema"])
 EDITABLE_SETTINGS = {
     "default_from_name": {"tipo": "texto", "descripcion": "Nombre de remitente por defecto"},
     "default_from_email": {"tipo": "correo", "descripcion": "Remitente por defecto"},
+    "default_subject": {"tipo": "texto", "descripcion": "Asunto predeterminado de campañas"},
     "default_reply_to": {"tipo": "correo", "descripcion": "Responder a (por defecto)"},
 }
 
@@ -135,6 +137,14 @@ def update_setting(key: str, payload: Dict[str, Any], request: Request,
         from fastapi import HTTPException, status as http_status
         raise HTTPException(http_status.HTTP_400_BAD_REQUEST, "Ajuste desconocido")
     value = payload.get("value")
+    # Las claves de correo comparten las mismas reglas estrictas que
+    # /system/mail-config (dominio exclusivo y anti inyección de cabeceras).
+    if key in mail_config.VALIDADORES:
+        try:
+            value = mail_config.VALIDADORES[key](value)
+        except mail_config.MailConfigError as exc:
+            from fastapi import HTTPException, status as http_status
+            raise HTTPException(http_status.HTTP_400_BAD_REQUEST, str(exc))
     row = db.get(AppSetting, key)
     if row:
         row.value = {"valor": value}
@@ -144,3 +154,46 @@ def update_setting(key: str, payload: Dict[str, Any], request: Request,
           entity_type="setting", entity_id=key, ip=security.client_ip(request))
     db.commit()
     return {"detalle": "Ajuste actualizado"}
+
+
+@router.get("/system/mail-config", dependencies=[Depends(get_current_user)])
+def get_mail_config(db: Session = Depends(get_db)):
+    """Configuración de correo efectiva (lectura para cualquier usuario autenticado).
+
+    La usan el apartado 'Configuración de correo' y la creación de campañas
+    para precargar remitente y asunto predeterminados.
+    """
+    guardado = mail_config.leer_guardado(db)
+    efectiva = mail_config.config_efectiva(db)
+    return {
+        "from_name": efectiva["from_name"],
+        "from_email": efectiva["from_email"],
+        "subject": efectiva["subject"],
+        "dominio": mail_config.MAIL_DOMAIN,
+        "guardado": guardado,
+    }
+
+
+@router.put("/system/mail-config")
+def update_mail_config(payload: Dict[str, Any], request: Request,
+                       db: Session = Depends(get_db), admin: User = Depends(require_admin)):
+    """Guarda remitente y asunto predeterminados (solo administradores).
+
+    Reutiliza la tabla app_settings; valida dominio del remitente y ausencia
+    de saltos de línea (anti inyección de cabeceras) en todos los campos.
+    """
+    from fastapi import HTTPException, status as http_status
+
+    try:
+        valores = mail_config.guardar_config(
+            db,
+            from_name=payload.get("from_name", ""),
+            from_email=payload.get("from_email", ""),
+            subject=payload.get("subject", ""),
+        )
+    except mail_config.MailConfigError as exc:
+        raise HTTPException(http_status.HTTP_400_BAD_REQUEST, str(exc))
+    audit(db, "config_correo_actualizada", user_id=admin.id, user_email=admin.email,
+          entity_type="setting", entity_id="mail-config", ip=security.client_ip(request))
+    db.commit()
+    return {"detalle": "Configuración de correo guardada", "config": valores}

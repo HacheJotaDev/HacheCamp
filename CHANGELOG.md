@@ -3,6 +3,32 @@
 Todas las cambios notables de HJ Campaigns se documentan aquí.
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y versionado SemVer.
 
+## [Sin publicar]
+
+### Añadido
+
+- **Configuración de correo** (remitente y asunto predeterminados centralizados):
+  - Nuevo apartado independiente en el menú lateral (`/panel/config-correo`),
+    al mismo nivel que Campañas, Listas y Plantillas, con tres campos editables
+    (nombre del remitente, correo del remitente y asunto predeterminado),
+    previsualización de la cabecera `From` y botón **Guardar configuración**.
+  - Backend: `GET/PUT /api/v1/system/mail-config` reutiliza la tabla
+    `app_settings` (sin migraciones). Solo administradores guardan (`403` para
+    el resto); lectura para cualquier usuario autenticado.
+  - Validación en frontend y backend (`app/services/mail_config.py`): el correo
+    del remitente debe pertenecer exclusivamente al dominio verificado
+    `leisureparts4u.store`; se rechazan saltos de línea y caracteres de control
+    (anti inyección de cabeceras RFC 5322); longitudes acotadas. El endpoint
+    genérico `PUT /settings/{key}` comparte las mismas reglas para las claves
+    de correo.
+  - Las campañas nuevas cargan automáticamente estos valores; si una campaña
+    ya tiene remitente o asunto propios, no se sobrescriben. Los envíos de
+    prueba (plantillas y campañas) usan la configuración sin reintroducir
+    datos; el destinatario sigue siendo editable e independiente.
+  - 18 pruebas de regresión (`backend/tests/test_mail_config.py`), incluida la
+    verificación de la cabecera `From`/`Subject` construida para el mensaje
+    (decodificada como la mostraría Gmail).
+
 ## [2.0.0] — 2026-10-27
 
 Versión PRO: plataforma de campañas profesional con flujo simplificado,

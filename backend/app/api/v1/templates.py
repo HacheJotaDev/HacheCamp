@@ -20,6 +20,7 @@ from app.schemas import (
     TemplateUpdate,
     TemplateVersionOut,
 )
+from app.services.mail_config import config_efectiva
 from app.services.renderer import (
     build_context,
     blocks_to_html,
@@ -264,26 +265,35 @@ def preview_template(payload: PreviewRequest, user: User = Depends(get_current_u
 @router.post("/test-send")
 def send_test(payload: SendTestRequest, request: Request,
               db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    """Envío de prueba a una dirección autorizada mediante SES."""
+    """Envío de prueba a una dirección autorizada mediante SES.
+
+    Remitente y asunto son opcionales: si se omiten se usan los valores
+    guardados en "Configuración de correo" (sin reintroducirlos).
+    """
     from app.services import ses as ses_service
+
+    cfg = config_efectiva(db)
+    from_email = payload.from_email or cfg["from_email"]
+    from_name = payload.from_name or cfg["from_name"]
+    subject = (payload.subject or "").strip() or cfg["subject"] or "[Prueba] HJ Campaigns"
 
     context = build_context(
         contact={"email": payload.to_email, "first_name": "Prueba"},
-        campaign={"name": "Prueba", "subject": payload.subject},
+        campaign={"name": "Prueba", "subject": subject},
         unsubscribe_url="https://ejemplo.local/baja?token=PRUEBA",
     )
     try:
-        subject, html_final, plain = render_campaign_email(
+        subject_render, html_final, plain = render_campaign_email(
             mode=payload.mode, blocks=payload.blocks, html_source=payload.html,
-            subject=payload.subject, context=context,
+            subject=subject, context=context,
         )
     except SanitizationError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc))
 
     try:
         ses_id = ses_service.send_test_email(
-            to_email=payload.to_email, subject=subject, html=html_final, text=plain,
-            from_email=payload.from_email, from_name=payload.from_name,
+            to_email=payload.to_email, subject=subject_render, html=html_final, text=plain,
+            from_email=from_email, from_name=from_name,
             reply_to=payload.reply_to,
         )
     except ses_service.SESNotConfigured as exc:

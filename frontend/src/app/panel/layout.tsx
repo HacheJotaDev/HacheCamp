@@ -6,7 +6,7 @@ import { usePathname, useRouter } from "next/navigation";
 import {
   LayoutDashboard, Users, Mail, FileText, Ban, Settings, Loader2,
   Sun, Moon, LogOut, FolderOpen, CalendarClock, ListOrdered, BarChart3,
-  Inbox, Menu, X,
+  Inbox, Menu, X, AtSign,
 } from "lucide-react";
 import { useState } from "react";
 import { useTheme } from "next-themes";
@@ -31,6 +31,7 @@ const NAV = [
   { href: "/panel/estadisticas", label: "Estadísticas", icon: BarChart3 },
   { href: "/panel/entregabilidad", label: "Entregabilidad", icon: Inbox },
   { href: "/panel/supresion", label: "Supresión", icon: Ban },
+  { href: "/panel/config-correo", label: "Configuración de correo", icon: AtSign },
   { href: "/panel/ajustes", label: "Ajustes", icon: Settings },
 ];
 

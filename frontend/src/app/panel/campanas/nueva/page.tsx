@@ -15,7 +15,7 @@ import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
-import { api, ContactList, Segment, Template } from "@/lib/api";
+import { api, ContactList, MailConfig, Segment, Template } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { numero } from "@/components/shared";
 
@@ -31,7 +31,10 @@ export default function NuevaCampanaPage() {
   const qc = useQueryClient();
   const [paso, setPaso] = useState(1);
   const [nombre, setNombre] = useState("");
-  const [asunto, setAsunto] = useState("");
+  // Asunto: null = el usuario aún no escribió el suyo → se muestra el asunto
+  // predeterminado de "Configuración de correo". Lo que el usuario escriba
+  // nunca se sobrescribe.
+  const [asuntoPropio, setAsunto] = useState<string | null>(null);
   const [categoria, setCategoria] = useState("promocional");
   const [listId, setListId] = useState("");
   const [segmentId, setSegmentId] = useState("");
@@ -52,6 +55,11 @@ export default function NuevaCampanaPage() {
   const { data: segmentos } = useQuery({
     queryKey: ["segmentos"], queryFn: () => api.get<Segment[]>("/api/v1/segments"),
   });
+  // Configuración de correo: remitente y asunto predeterminados del panel
+  const { data: correoConfig } = useQuery({
+    queryKey: ["mail-config"], queryFn: () => api.get<MailConfig>("/api/v1/system/mail-config"),
+  });
+  const asunto = asuntoPropio ?? correoConfig?.subject ?? "";
 
   const { data: estimacion, isFetching: contando } = useQuery({
     queryKey: ["preview-destinatarios", listId, segmentId, categoria],
@@ -229,6 +237,12 @@ export default function NuevaCampanaPage() {
               <Input value={asunto} onChange={(e) => setAsunto(e.target.value)}
                 placeholder="Oficina especial de diciembre para ti"
                 onBlur={() => !nombre && setNombre(asunto.trim().slice(0, 60))} />
+              {correoConfig && (
+                <p className="text-xs text-muted-foreground">
+                  Se enviará como <b>{correoConfig.from_name}</b> &lt;{correoConfig.from_email}&gt; · cambia el valor por defecto en{" "}
+                  <Link href="/panel/config-correo" className="text-emerald-600 hover:underline">Configuración de correo</Link>
+                </p>
+              )}
             </div>
             <div className="space-y-1.5">
               <Label>Nombre interno (opcional)</Label>
@@ -372,7 +386,9 @@ export default function NuevaCampanaPage() {
         <Card>
           <CardContent className="p-4 space-y-3 text-sm">
             <Resumen etiqueta="Asunto" valor={asunto} />
-            <Resumen etiqueta="Remitente" valor="Configurado por defecto (notificaciones del sistema)" />
+            <Resumen etiqueta="Remitente" valor={correoConfig
+              ? `${correoConfig.from_name} <${correoConfig.from_email}>`
+              : "Configurado por defecto (notificaciones del sistema)"} />
             <Resumen etiqueta="Destinatarios" valor={
               `${listId
                 ? listas?.find((l) => l.id === listId)?.name ?? "lista"

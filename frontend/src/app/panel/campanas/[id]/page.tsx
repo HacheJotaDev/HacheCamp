@@ -309,6 +309,9 @@ export default function CampanaDetallePage({ params }: { params: Promise<{ id: s
             <Label>Correo destinatario</Label>
             <Input type="email" value={correoPrueba} onChange={(e) => setCorreoPrueba(e.target.value)}
               placeholder="tu@correo.com" />
+            <p className="text-xs text-muted-foreground">
+              Se enviará como <b>{c.from_name}</b> &lt;{c.from_email}&gt; · el destinatario es independiente.
+            </p>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setDialogoPrueba(false)}>Cancelar</Button>
