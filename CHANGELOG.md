@@ -181,6 +181,40 @@ métricas correctas y visibilidad de entregabilidad honesta.
   lo indica con la guía de conexión. La medición queda marcada como
   **pendiente de verificación**, no funcional.
 
+### Corregido en la revisión de producción 4 (post-despliegue: preview, importación y eliminaciones)
+
+- **Previsualización de plantillas HTML rota (500 NameError)**: `templates.py`
+  llamaba a `inline_email_css()` sin importarla (`renderer.py` la importaba;
+  `templates.py` no). El error solo aparecía al usar el endpoint
+  `POST /templates/preview` con `mode=html`, por eso la suite no lo detectaba.
+  Corregida la importación; el preview vuelve a aplicar el CSS inline.
+- **Importación CSV/TXT con «Field required»**: el frontend llamaba a
+  `api.post(path, formData)`; `api.post` serializa su argumento como JSON
+  (un FormData se convierte en `{}` con `Content-Type: application/json`), de
+  modo que la API nunca recibía el archivo y respondía 422 con el mensaje
+  críptico «Field required» (campo `archivo`). El backend y el nombre de campo
+  `archivo` eran correctos. Corregido con `api.postForm` (que no fija
+  Content-Type y deja que el navegador ponga el boundary), el tipado de
+  `api.post` ahora exige objetos planos (impide repetir el error) y los
+  errores 422 se muestran con el campo afectado («campo 'archivo': …»).
+- **Eliminación de contactos**: añadida la eliminación individual (botón en la
+  fila y en el detalle) reutilizando `POST /contacts/bulk-delete` con
+  confirmación explícita, junto a la masiva existente. Integridad verificada
+  por pruebas: los mensajes de campaña y el historial de consentimiento se
+  borran en cascada, la campaña no se rompe, las **supresiones del correo se
+  conservan** (un correo suprimido nunca vuelve a «suscripto» tras
+  reimportarse) y la **auditoría** registra la acción. El contador de la tabla
+  se actualiza automáticamente.
+- **Eliminación de plantillas mejorada**: confirmación con `AlertDialog` en
+  lugar de `confirm()` nativo; las plantillas del sistema siguen protegidas
+  (400); al eliminar una plantilla usada por campañas, la API responde con el
+  número de campañas asociadas y la interfaz lo informa — no se rompe nada
+  porque el contenido de la campaña se congela al crearse y la FK es
+  `ON DELETE SET NULL` (verificado con pruebas).
+- Sin cambios de esquema de base de datos (no se requieren migraciones).
+- **Suite backend: 142 pruebas** en verde (128 previas + 14 nuevas de
+  regresión en `tests/test_fixes_produccion.py`). `next build` en verde.
+
 ## [1.0.1] — 2026-10-27
 
 Correcciones previas al despliegue en el VPS (reportadas tras clonar `ee845ee`).
