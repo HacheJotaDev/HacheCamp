@@ -174,6 +174,17 @@ export interface EditorBlock {
   props: Record<string, any>;
 }
 
+export interface TemplateVersion {
+  id: string;
+  template_id: string;
+  version: number;
+  mode: "bloques" | "html";
+  blocks: EditorBlock[] | null;
+  html: string | null;
+  created_by: string | null;
+  created_at: string;
+}
+
 export interface Campaign {
   id: string;
   name: string;
@@ -202,6 +213,8 @@ export interface Campaign {
   scheduled_at: string | null;
   timezone: string;
   approved_at: string | null;
+  enqueued_at: string | null;
+  completed_at: string | null;
   created_at: string;
   updated_at: string;
   progreso?: {
@@ -234,6 +247,21 @@ export interface Paged<T> {
 
 export interface DashboardData {
   resumen: Record<string, number>;
+  metricas?: {
+    total: number;
+    aceptados_ses: number;
+    entregados: number;
+    pendientes: number;
+    fallidos: number;
+    rebotes: number;
+    rebotes_temporales: number;
+    quejas: number;
+    success_rate: number | null;
+    bounce_rate: number | null;
+    open_rate: number | null;
+    click_rate: number | null;
+    denominadores?: Record<string, string>;
+  };
   cuota_ses: {
     max_24h?: number;
     sent_last_24h?: number;
