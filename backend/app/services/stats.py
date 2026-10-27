@@ -1,8 +1,22 @@
-"""Agregaciones estadísticas reales (sin métricas inventadas)."""
+"""Agregaciones estadísticas reales (sin métricas inventadas).
+
+Definiciones de las tasas (denominadores explícitos):
+- Success Rate  = entregas confirmadas / mensajes con resultado definitivo.
+  Definitivo = entregado + rebote permanente + error + queja + incierto.
+- Bounce Rate   = rebotes (permanentes + temporales) / mensajes aceptados
+  por SES (enviados).
+- Open Rate     = destinatarios únicos con al menos una apertura /
+  entregas confirmadas. Varias aperturas del mismo destinatario cuentan
+  como una sola persona.
+- Click Rate    = destinatarios únicos con al menos un clic /
+  entregas confirmadas.
+- Failed        = mensajes que no pudieron enviarse o fueron rechazados
+  definitivamente (estado 'error').
+"""
 from __future__ import annotations
 
 from datetime import timedelta
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -10,6 +24,115 @@ from sqlalchemy.orm import Session
 from app.core.db import utcnow
 from app.models import Campaign, CampaignMessage, SesEvent, Suppression
 from app.services import contacts as contact_service
+
+
+def _conteo_mensajes(db: Session, campaign_id: Optional[str] = None) -> Dict[str, int]:
+    query = db.query(CampaignMessage.status, func.count(CampaignMessage.id))
+    if campaign_id:
+        query = query.filter(CampaignMessage.campaign_id == campaign_id)
+    result: Dict[str, int] = {}
+    for status, total in query.group_by(CampaignMessage.status).all():
+        result[status] = total
+    return result
+
+
+def _unicos_con_evento(db: Session, tipo: str, campaign_id: Optional[str] = None) -> int:
+    """Mensajes únicos con al menos un evento del tipo dado (una persona, no
+    varios eventos)."""
+    query = (
+        db.query(func.count(func.distinct(SesEvent.message_id)))
+        .filter(SesEvent.type == tipo, SesEvent.message_id.isnot(None))
+    )
+    if campaign_id:
+        query = query.filter(SesEvent.campaign_id == campaign_id)
+    return int(query.scalar() or 0)
+
+
+def metrics_summary(db: Session, campaign_id: Optional[str] = None) -> Dict[str, Any]:
+    """Tasas y totales con denominadores explícitos, por campaña o globales."""
+    m = _conteo_mensajes(db, campaign_id)
+    aceptados = sum(m.get(s, 0) for s in ("aceptado", "entregado", "rebote_permanente",
+                                           "rebote_temporal", "queja", "incierto"))
+    entregado = m.get("entregado", 0)
+    rebotes_duros = m.get("rebote_permanente", 0)
+    rebotes_suaves = m.get("rebote_temporal", 0)
+    errores = m.get("error", 0)
+    quejas = m.get("queja", 0)
+    inciertos = m.get("incierto", 0)
+    pendientes = m.get("pendiente", 0) + m.get("enviando", 0) + m.get("cancelado", 0)
+
+    # Resultado definitivo: el mensaje ya tiene resolución de entrega o fallo
+    definitivos = entregado + rebotes_duros + errores + quejas + inciertos
+    aperturas_unicas = _unicos_con_evento(db, "open", campaign_id)
+    clics_unicos = _unicos_con_evento(db, "click", campaign_id)
+
+    def _pct(numerador: int, denominador: int) -> Optional[float]:
+        if denominador <= 0:
+            return None  # no calculable: no se inventa un cero
+        return round(100.0 * numerador / denominador, 1)
+
+    return {
+        "total": sum(m.values()),
+        "aceptados_ses": aceptados,
+        "entregados": entregado,
+        "pendientes": pendientes,
+        "fallidos": errores,
+        "rebotes": rebotes_duros,
+        "rebotes_temporales": rebotes_suaves,
+        "quejas": quejas,
+        "success_rate": _pct(entregado, definitivos),
+        "bounce_rate": _pct(rebotes_duros + rebotes_suaves, aceptados),
+        "open_rate": _pct(aperturas_unicas, entregado),
+        "click_rate": _pct(clics_unicos, entregado),
+        "aperturas_unicas": aperturas_unicas,
+        "clics_unicos": clics_unicos,
+        "denominadores": {
+            "success_rate": "entregados / (entregados + rebotes permanentes + errores + quejas + inciertos)",
+            "bounce_rate": "(rebotes permanentes + temporales) / aceptados por SES",
+            "open_rate": "destinatarios únicos con apertura / entregas confirmadas",
+            "click_rate": "destinatarios únicos con clic / entregas confirmadas",
+        },
+    }
+
+
+def deliverability_summary(db: Session) -> Dict[str, Any]:
+    """Resumen de entregabilidad honesto.
+
+    SES no informa de la ubicación final (Inbox/Spam) de cada mensaje: solo
+    confirma la entrega al servidor receptor y notifica rebotes y quejas.
+    Las ubicaciones se marcan como no disponibles salvo que se configuren
+    pruebas con buzones semilla (seed testing).
+    """
+    m = _conteo_mensajes(db)
+    eventos: Dict[str, int] = {}
+    for etype, total in (
+        db.query(SesEvent.type, func.count(SesEvent.id)).group_by(SesEvent.type).all()
+    ):
+        eventos[etype] = total
+    return {
+        "aceptados_por_ses": m.get("aceptado", 0) + m.get("entregado", 0) + m.get("rebote_permanente", 0)
+                             + m.get("rebote_temporal", 0) + m.get("queja", 0) + m.get("incierto", 0),
+        "entregado_servidor_receptor": m.get("entregado", 0) or eventos.get("delivery", 0),
+        "rebote_permanente": m.get("rebote_permanente", 0),
+        "rebote_temporal": m.get("rebote_temporal", 0),
+        "rechazados": eventos.get("reject", 0),
+        "quejas_spam": eventos.get("complaint", 0),
+        "ubicacion_desconocida": m.get("incierto", 0),
+        "inbox_confirmado": None,
+        "spam_confirmado": None,
+        "inbox_testing": {
+            "disponible": False,
+            "motivo": (
+                "Amazon SES no informa de la ubicación final de cada mensaje. Para medir "
+                "Inbox/Spam hay que configurar pruebas con buzones semilla autorizados "
+                "(seed testing); no se muestran cifras estimadas."
+            ),
+        },
+        "nota": (
+            "«Entregado al servidor receptor» es la confirmación de SES (evento delivery); "
+            "no equivale a haber llegado a la bandeja de entrada."
+        ),
+    }
 
 
 def dashboard_summary(db: Session) -> Dict[str, Any]:
@@ -56,12 +179,14 @@ def dashboard_summary(db: Session) -> Dict[str, Any]:
     }
 
 
-def daily_series(db: Session, days: int = 30) -> List[Dict[str, Any]]:
+def daily_series(db: Session, days: int = 30, campaign_id: Optional[str] = None) -> List[Dict[str, Any]]:
     """Evolución diaria de eventos (entregas, rebotes, quejas, bajas, aperturas, clics)."""
     since = utcnow() - timedelta(days=days)
+    ev_query = db.query(SesEvent.type, func.date(SesEvent.occurred_at), func.count(SesEvent.id))
+    if campaign_id:
+        ev_query = ev_query.filter(SesEvent.campaign_id == campaign_id)
     rows = (
-        db.query(SesEvent.type, func.date(SesEvent.occurred_at), func.count(SesEvent.id))
-        .filter(SesEvent.occurred_at >= since, SesEvent.type.in_(
+        ev_query.filter(SesEvent.occurred_at >= since, SesEvent.type.in_(
             ["delivery", "bounce", "complaint", "unsubscribe", "open", "click"]
         ))
         .group_by(SesEvent.type, func.date(SesEvent.occurred_at))
@@ -73,9 +198,11 @@ def daily_series(db: Session, days: int = 30) -> List[Dict[str, Any]]:
         by_date.setdefault(key, {})[etype] = total
 
     # Envíos por día (aceptados por SES) desde campaign_messages
+    send_query = db.query(func.date(CampaignMessage.sent_at), func.count(CampaignMessage.id))
+    if campaign_id:
+        send_query = send_query.filter(CampaignMessage.campaign_id == campaign_id)
     send_rows = (
-        db.query(func.date(CampaignMessage.sent_at), func.count(CampaignMessage.id))
-        .filter(CampaignMessage.sent_at >= since, CampaignMessage.status.notin_(["pendiente"]))
+        send_query.filter(CampaignMessage.sent_at >= since, CampaignMessage.status.notin_(["pendiente"]))
         .group_by(func.date(CampaignMessage.sent_at))
         .all()
     )

@@ -47,19 +47,55 @@ def healthz(db: Session = Depends(get_db)):
 
 @router.get("/ses/status", dependencies=[Depends(get_current_user)])
 def ses_status(db: Session = Depends(get_db)):
-    """Estado de SES: cuotas reales, identidad del remitente y configuración."""
+    """Estado de SES: cuotas dinámicas, reputación, identidades y configuración."""
     identities, err = ses_service.list_verified_identities() if settings.ENV != "development" else ([], "desarrollo")
     try:
         quota = ses_service.get_sending_quota()
     except Exception as exc:
         quota = {"error": type(exc).__name__, "region": settings.AWS_REGION}
+    # Reputación y estado de la cuenta (consulta dinámica; nunca valores fijos)
+    reputacion: Dict[str, Any] = {"disponible": False}
+    try:
+        client = ses_service._client()
+        cuenta = client.get_account()
+        reputacion = {
+            "disponible": True,
+            "envio_habilitado": bool(cuenta.get("SendingEnabled", False)),
+            "estado_aplicacion": cuenta.get("EnforcementStatus", ""),
+            "modo_produccion": cuenta.get("EnforcementStatus") == "PROD",
+            "zona_de_calentamiento": bool(cuenta.get("ProductionAccessDisabled", False) is False
+                                          and cuenta.get("EnforcementStatus") not in ("PROD", "")),
+        }
+    except Exception as exc:
+        reputacion["error"] = type(exc).__name__
+    # Últimos errores de envío registrados (mensajes con estado error)
+    from datetime import timedelta
+
+    from sqlalchemy import func
+
+    from app.core.db import utcnow
+    from app.models import CampaignMessage
+    errores_24h = (
+        db.query(func.count(CampaignMessage.id))
+        .filter(CampaignMessage.status == "error",
+                CampaignMessage.updated_at >= utcnow() - timedelta(hours=24))
+        .scalar() or 0
+    )
+    cola_sqs = settings.AWS_SQS_EVENTS_QUEUE_URL or ""
     return {
         "region": settings.AWS_REGION,
         "cuota": quota,
+        "reputacion": reputacion,
         "identidades": identities,
         "error_identidades": err,
         "remitente_inicial": "notificaciones@leisureparts4u.store",
         "configuration_set": settings.SES_CONFIGURATION_SET,
+        "eventos_sqs": {
+            "habilitado": bool(cola_sqs),
+            # No se expone la URL completa (contiene el ID de la cuenta AWS)
+            "cola": cola_sqs.rsplit("/", 1)[-1] if cola_sqs else None,
+        },
+        "errores_envio_24h": errores_24h,
     }
 
 
