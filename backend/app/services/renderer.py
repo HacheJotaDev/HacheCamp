@@ -18,7 +18,7 @@ from jinja2 import Environment, StrictUndefined, Undefined
 from jinja2.sandbox import SandboxedEnvironment
 
 from app.core.config import settings
-from app.services.sanitizer import sanitize_email_html, validate_url
+from app.services.sanitizer import inline_email_css, sanitize_email_html, validate_url
 
 # --------------------------------------------------------------------------- #
 # Motor de plantillas
@@ -295,9 +295,12 @@ def render_campaign_email(
 
     # 1) Sustitución de variables ({{unsubscribe_url}} etc.)
     html_rendered = render_template_string(raw_html, context)
-    # 2) Sanitización final (sin JavaScript, URLs seguras)
-    html_final = sanitize_email_html(html_rendered)
-    # 3) Texto plano
+    # 2) Sanitización final (sin JavaScript, URLs seguras, conserva <style>)
+    html_sanitized = sanitize_email_html(html_rendered)
+    # 3) CSS de <style> convertido a estilos inline (Premailer) para que el
+    #    diseño sobreviva en clientes de correo que ignoran <style>
+    html_final = inline_email_css(html_sanitized)
+    # 4) Texto plano
     plain = html_to_plain_text(html_final)
     plain = wrap_plain_with_unsubscribe(plain)
     plain = render_template_string(plain, context)

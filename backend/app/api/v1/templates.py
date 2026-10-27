@@ -225,7 +225,7 @@ def preview_template(payload: PreviewRequest, user: User = Depends(get_current_u
     )
     if payload.mode == "html":
         raw = payload.html or ""
-        html = sanitize_email_html(render_template_string(raw, context))
+        html = inline_email_css(sanitize_email_html(render_template_string(raw, context)))
     else:
         html = blocks_to_html(payload.blocks or [], click_signer=None)
         html = render_template_string(html, context)
