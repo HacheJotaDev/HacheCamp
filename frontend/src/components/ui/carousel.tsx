@@ -95,11 +95,15 @@ function Carousel({
 
   React.useEffect(() => {
     if (!api) return
-    onSelect(api)
+    // Estado inicial diferido un tick (evita setState síncrono en el efecto,
+    // regla react-hooks/set-state-in-effect); los cambios se sincronizan por
+    // eventos como antes.
+    const inicial = setTimeout(() => onSelect(api), 0)
     api.on("reInit", onSelect)
     api.on("select", onSelect)
 
     return () => {
+      clearTimeout(inicial)
       api?.off("select", onSelect)
     }
   }, [api, onSelect])

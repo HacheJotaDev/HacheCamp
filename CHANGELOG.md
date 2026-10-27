@@ -7,6 +7,45 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y 
 
 ### Corregido
 
+- **Importación masiva de contactos asíncrona** (el CSV de 50.656 correos
+  bloqueaba el API, dejaba transacciones PostgreSQL "idle in transaction" y la
+  base acababa con 0 contactos):
+  - El API ya NO importa dentro del request: prevalida el archivo en un hilo
+    (parse + validación + deduplicación), persiste el plan y responde **202**
+    con un `job_id` en segundos. Un **worker importador separado** del worker
+    de envíos (servicio `import-worker` en Docker Compose) procesa el trabajo
+    **por lotes de 500 con commits cortos**: sin transacciones largas, sin
+    bloquear INSERTs ajenos y con el login respondiendo todo el tiempo.
+  - Progreso persistente en `import_jobs` (creados, actualizados, inválidos,
+    duplicados, errores, avisos de supresión/estado) consultable desde el
+    panel; el plan prevalidado va en `import_job_data` (tabla 1:1) para que
+    las actualizaciones de progreso nunca reescriban megabytes.
+  - **Reanudación tras reinicios**: al arrancar, el worker reencola los
+    trabajos pendientes/interrumpidos y continúa desde el último lote
+    confirmado. Idempotente: reintentar un lote no duplica contactos ni infla
+    cifras (el conteo creado/actualizado se decide contra el estado real de
+    la BD por lote); una fila problemática no tira el trabajo (ruta lenta
+    fila a fila). Cancelación entre lotes conservando el progreso.
+  - Invariantes intactos: validación CSV/TXT y codificación, deduplicación,
+    asociaciones a listas/etiquetas, eventos de consentimiento, auditoría
+    (solicitud en el API + completado en el worker) y **nunca reactiva**
+    bajas, rebotes, quejas ni correos suprimidos.
+  - Panel de contactos: subida asíncrona con barra de progreso sondeada,
+    estadísticas finales, cancelación y "últimas importaciones" para consultar
+    el progreso sin re-subir.
+  - Regresión: alias `GET /system/ses/status`, `/system/audit` y
+    `/system/settings[/{key}]` (la pestaña SES de Ajustes devolvía 404 porque
+    el frontend llama con prefijo `/system` y el backend lo montaba sin él;
+    las rutas antiguas siguen funcionando).
+  - Lint del frontend a 0 errores: `useIsMobile` reescrito con
+    `useSyncExternalStore`, estado inicial del carrusel diferido un tick y el
+    editor de plantillas usa el patrón "ajustar estado durante el render".
+  - Pruebas: 19 nuevas (flujo asíncrono completo, **50.656 contactos con el
+    login respondiendo durante y después**, reimportación idempotente de 50k,
+    reanudación tras crash, cancelación, supresión/baja/rebote/queja intactos,
+    consentimiento+listas+etiquetas, auditoría, cola independiente,
+    límite de filas). Suite: 185/185.
+
 - **"Configuración de correo" es la única fuente de verdad para TODOS los envíos**
   (corrección de la integración anterior):
   - El worker (envíos inmediatos **y programados**), la prueba de campañas y la

@@ -29,22 +29,21 @@ def test_normalizacion_y_validacion_email():
     assert not is_valid_email("@dominio.com")
 
 
-def test_import_csv_crea_actualiza_y_deduplica(client, admin_auth):
-    files = {"archivo": ("contactos.csv", CSV_VALIDO.encode("utf-8"), "text/csv")}
-    data = {"consent_source": "formulario_web", "consent_text": "Acepto recibir comunicaciones"}
-    resp = client.post("/api/v1/contacts/import", files=files, data=data)
-    assert resp.status_code == 200, resp.text
-    result = resp.json()
-    assert result["creados"] == 3
-    assert result["filas_invalidas"] == 1
-    assert result["duplicados_en_archivo"] == 1
-    assert result["notices"] == {}
+def test_import_csv_crea_actualiza_y_deduplica(client, admin_auth, importar_csv):
+    progreso = importar_csv(CSV_VALIDO.encode("utf-8"),
+                            consent_source="formulario_web",
+                            consent_text="Acepto recibir comunicaciones")
+    assert progreso["creados"] == 3
+    assert progreso["filas_invalidas"] == 1
+    assert progreso["duplicados_en_archivo"] == 1
+    assert progreso["notices"] == {}
 
     # Reimportar: duplicados contra BD -> actualizados, no creados
-    resp2 = client.post("/api/v1/contacts/import", files=files, data=data)
-    result2 = resp2.json()
-    assert result2["creados"] == 0
-    assert result2["actualizados"] == 3
+    progreso2 = importar_csv(CSV_VALIDO.encode("utf-8"),
+                             consent_source="formulario_web",
+                             consent_text="Acepto recibir comunicaciones")
+    assert progreso2["creados"] == 0
+    assert progreso2["actualizados"] == 3
 
     # El correo se normalizó (minúsculas)
     db = SessionLocal()
@@ -54,13 +53,12 @@ def test_import_csv_crea_actualiza_y_deduplica(client, admin_auth):
     assert contacto.consent_source == "formulario_web"
 
 
-def test_import_csv_simulacion_no_persiste(client, admin_auth):
+def test_import_preview_no_persiste(client, admin_auth):
     csv_data = f"email,nombre\nuniq-{uuid.uuid4().hex[:6]}@x.com,Test\n".encode()
-    files = {"archivo": ("nuevo.csv", csv_data, "text/csv")}
-    resp = client.post("/api/v1/contacts/import", files=files,
-                       data={"consent_source": "prueba", "dry_run": "true"})
+    resp = client.post("/api/v1/contacts/import/preview",
+                       files={"archivo": ("nuevo.csv", csv_data, "text/csv")})
     assert resp.status_code == 200
-    assert resp.json()["simulacion"] is True
+    assert resp.json()["filas_validas"] == 1
     db = SessionLocal()
     count = db.query(Contact).filter(Contact.first_name == "Test").count()
     db.close()
@@ -90,7 +88,7 @@ def test_alta_manual_con_consentimiento(client, admin_auth):
     assert "alta" in events and "consentimiento" in events
 
 
-def test_baja_impide_reactivacion_por_import(client, admin_auth):
+def test_baja_impide_reactivacion_por_import(client, admin_auth, importar_csv):
     """Un contacto dado de baja NO se reactiva al reimportar el CSV."""
     email = f"baja-{uuid.uuid4().hex[:6]}@test.local"
     resp = client.post("/api/v1/contacts", json={
@@ -98,13 +96,10 @@ def test_baja_impide_reactivacion_por_import(client, admin_auth):
     cid = resp.json()["id"]
     client.delete(f"/api/v1/contacts/{cid}")  # baja + supresión
 
-    csv_data = f"email\n{email}\n".encode()
-    files = {"archivo": ("re.csv", csv_data, "text/csv")}
-    resp2 = client.post("/api/v1/contacts/import", files=files,
-                        data={"consent_source": "formulario_web"})
-    result = resp2.json()
-    assert result["creados"] == 0
-    assert result["notices"].get("existente_estado_dado_baja") == 1
+    progreso = importar_csv(f"email\n{email}\n".encode(),
+                            consent_source="formulario_web")
+    assert progreso["creados"] == 0
+    assert progreso["notices"].get("existente_estado_dado_baja") == 1
 
     db = SessionLocal()
     c = db.query(Contact).filter(Contact.email == email).first()
@@ -167,7 +162,7 @@ def test_busqueda_y_filtro_por_estado(client, admin_auth):
     assert resp.json()["total"] >= 1
 
 
-def test_alta_simplificada_no_activa_suprimido(client, admin_auth):
+def test_alta_simplificada_no_activa_suprimido(client, admin_auth, importar_csv):
     """Un correo en la lista de supresión sin contacto previo NO se crea como
     suscripto: entra como dado_baja y no es elegible para campañas."""
     from app.services.contacts import suppress_email
@@ -186,10 +181,9 @@ def test_alta_simplificada_no_activa_suprimido(client, admin_auth):
     assert db.query(Suppression).filter(Suppression.email == email).first() is not None
     db.close()
     csv_data = f"email\n{email}\n".encode()
-    resp2 = client.post("/api/v1/contacts/import",
-                        files={"archivo": ("s.csv", csv_data, "text/csv")})
+    progreso = importar_csv(csv_data)
     # La reimportación ya lo encuentra como dado_baja (nunca lo activa)
-    assert resp2.json()["notices"].get("existente_estado_dado_baja") == 1
+    assert progreso["notices"].get("existente_estado_dado_baja") == 1
 
     # El asistente no lo cuenta como elegible (lista vacía -> preview exige lista;
     # se verifica vía select_recipients equivalente: no está en "suscripto")
@@ -197,7 +191,7 @@ def test_alta_simplificada_no_activa_suprimido(client, admin_auth):
     assert est.json()["total"] == 0
 
 
-def test_reimportar_suscripto_no_altera_su_suscripcion(client, admin_auth):
+def test_reimportar_suscripto_no_altera_su_suscripcion(client, admin_auth, importar_csv):
     """Recrear/reesportar un contacto suscripto no cambia su estado ni duplica."""
     email = f"act-{uuid.uuid4().hex[:6]}@test.local"
     resp = client.post("/api/v1/contacts", json={
@@ -208,11 +202,8 @@ def test_reimportar_suscripto_no_altera_su_suscripcion(client, admin_auth):
     # Re-alta por formulario (solo correo) e reimportación
     resp2 = client.post("/api/v1/contacts", json={"email": email})
     assert resp2.json()["status"] == "suscripto"
-    csv_data = f"email\n{email}\n".encode()
-    resp3 = client.post("/api/v1/contacts/import",
-                        files={"archivo": ("r.csv", csv_data, "text/csv")})
-    r3 = resp3.json()
-    assert r3["creados"] == 0
+    progreso = importar_csv(f"email\n{email}\n".encode())
+    assert progreso["creados"] == 0
 
     db = SessionLocal()
     contactos = db.query(Contact).filter(Contact.email == email).all()

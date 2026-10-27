@@ -2,21 +2,18 @@
 
 - Límite de tamaño configurable.
 - Detección de codificación (UTF-8 con/sin BOM, Latin-1 de reserva).
-- Detección de duplicados internos y contra la base de datos.
-- Modo simulación (dry_run) para previsualizar el resultado.
-- Normalización de direcciones y registro de consentimiento.
+- Detección de duplicados internos.
+- Prevalidación para la importación asíncrona (build_import_plan).
+- Normalización de direcciones.
 """
 from __future__ import annotations
 
 import csv
 import io
-from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-from sqlalchemy.orm import Session
-
 from app.core.config import settings
-from app.services.contacts import is_valid_email, normalize_email, upsert_contact
+from app.services.contacts import is_valid_email, normalize_email
 
 EXPECTED_COLUMNS = ["email", "first_name", "last_name"]
 COLUMN_ALIASES = {
@@ -74,8 +71,8 @@ def _parse_txt(text: str, encoding: str) -> Tuple[List[str], List[Dict[str, Any]
                 invalid += 1
             continue
         rows.append({"email": email, "line": line_no})
-        if len(rows) > 100_000:
-            raise CSVImportError("El archivo contiene más de 100.000 filas válidas")
+        if len(rows) > settings.IMPORT_MAX_ROWS:
+            raise CSVImportError(f"El archivo contiene más de {settings.IMPORT_MAX_ROWS:,} filas válidas".replace(",", "."))
     return ["email"], rows, invalid, encoding
 
 
@@ -143,72 +140,48 @@ def parse_csv_bytes(raw: bytes) -> Tuple[List[str], List[Dict[str, Any]], int, s
         if attributes:
             entry["attributes"] = attributes
         rows.append(entry)
-        if len(rows) > 100_000:
-            raise CSVImportError("El archivo contiene más de 100.000 filas válidas")
+        if len(rows) > settings.IMPORT_MAX_ROWS:
+            raise CSVImportError(f"El archivo contiene más de {settings.IMPORT_MAX_ROWS:,} filas válidas".replace(",", "."))
 
     headers_normalized = [h for h in ["email", "first_name", "last_name"] if h in mapping]
     return headers_normalized, rows, invalid_rows, encoding  # type: ignore[return-value]
 
 
-def import_contacts_from_csv(
-    db: Session,
-    raw: bytes,
-    *,
-    consent_source: str,
-    consent_text: Optional[str] = None,
-    source: str = "csv_import",
-    list_ids: Optional[List[str]] = None,
-    tag_ids: Optional[List[str]] = None,
-    dry_run: bool = False,
-) -> Dict[str, Any]:
-    """Importa contactos desde CSV. Devuelve un resumen detallado."""
+def build_import_plan(raw: bytes) -> Dict[str, Any]:
+    """Prevalida un archivo CSV/TXT y produce el PLAN de importación.
+
+    Se ejecuta en la subida (fuera del event loop, en un hilo): parsea,
+    normaliza, valida y deduplica en memoria. Devuelve un dict serializable a
+    JSON que el worker procesará por lotes:
+
+        {
+          "rows": [ {"email", "first_name", "last_name", "attributes", "line"}, ... ],
+          "filas_validas", "filas_invalidas", "duplicados_en_archivo",
+          "encoding", "headers",
+        }
+
+    Sin acceso a base de datos: la deduplicación contra la BD la hace el
+    worker por lote (upsert idempotente).
+    """
     _, rows, invalid_rows, encoding = parse_csv_bytes(raw)
 
-    created = updated = duplicates_in_file = suppressed_skipped = 0
-    notices: Dict[str, int] = {}
-    seen_emails: set[str] = set()
-
+    seen: set[str] = set()
+    plan_rows: List[Dict[str, Any]] = []
+    duplicates = 0
     for row in rows:
         email = row["email"]
-        if email in seen_emails:
-            duplicates_in_file += 1
+        if email in seen:
+            duplicates += 1
             continue
-        seen_emails.add(email)
+        seen.add(email)
+        plan_rows.append(row)
 
-        if dry_run:
-            continue
-
-        contact, was_created, notice = upsert_contact(
-            db,
-            email,
-            first_name=row.get("first_name"),
-            last_name=row.get("last_name"),
-            attributes=row.get("attributes"),
-            consent_source=consent_source,
-            consent_at=datetime.utcnow(),
-            consent_text=consent_text,
-            source=source,
-            list_ids=list_ids,
-            tag_ids=tag_ids,
-        )
-        if was_created:
-            created += 1
-        else:
-            updated += 1
-        if notice:
-            notices[notice] = notices.get(notice, 0) + 1
-
-    if not dry_run:
-        db.flush()
-
+    headers = sorted({k for r in plan_rows for k in r.keys() if k not in ("line",)} - {"email"})
     return {
-        "total_filas": len(rows) + invalid_rows,
-        "filas_validas": len(rows),
+        "rows": plan_rows,
+        "filas_validas": len(plan_rows),
         "filas_invalidas": invalid_rows,
-        "creados": created,
-        "actualizados": updated,
-        "duplicados_en_archivo": duplicates_in_file,
-        "notices": notices,
-        "simulacion": dry_run,
-        "codificacion": encoding,
+        "duplicados_en_archivo": duplicates,
+        "encoding": encoding,
+        "headers": ["email"] + headers,
     }

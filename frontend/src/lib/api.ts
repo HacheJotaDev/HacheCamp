@@ -143,6 +143,42 @@ export interface Tag {
   color: string;
 }
 
+// Importación asíncrona de contactos
+export interface ImportSubida {
+  job_id: string;
+  estado: string;
+  total_filas: number;
+  filas_validas: number;
+  filas_invalidas: number;
+  duplicados_en_archivo: number;
+  codificacion: string;
+}
+
+export interface ImportJob {
+  job_id: string;
+  filename: string;
+  estado: "pendiente" | "procesando" | "completado" | "fallido" | "cancelado";
+  progreso_pct: number;
+  total_filas: number;
+  filas_procesadas: number;
+  filas_invalidas: number;
+  duplicados_en_archivo: number;
+  creados: number;
+  actualizados: number;
+  errores: number;
+  notices: Record<string, number>;
+  error_samples: { line?: number; email: string; error: string }[];
+  last_error: string | null;
+  attempts: number;
+  cancel_requested: boolean;
+  encoding: string | null;
+  headers: string[] | null;
+  user_email: string | null;
+  created_at: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
 export interface Segment {
   id: string;
   name: string;

@@ -80,6 +80,35 @@ def outbound_count() -> int:
 
 
 # --------------------------------------------------------------------------- #
+# Cola de importaciones (independiente de la de envíos)
+# --------------------------------------------------------------------------- #
+
+IMPORT_KEY = "hj:q:import"  # LIST -> trabajos listos: JSON {"jid": <import_job_id>}
+
+
+def enqueue_import_job(job_id: str) -> None:
+    """Encola un trabajo de importación para el worker importador."""
+    get_redis().lpush(IMPORT_KEY, json.dumps({"jid": job_id}))
+
+
+def pop_import_job(timeout_seconds: int = 5) -> Optional[str]:
+    """BRPOP bloqueante sobre la cola de importaciones. Devuelve job_id o None."""
+    result = get_redis().brpop(IMPORT_KEY, timeout=timeout_seconds)
+    if not result:
+        return None
+    _, raw = result
+    try:
+        data = json.loads(raw)
+        return data.get("jid")
+    except Exception:
+        return None
+
+
+def import_queue_count() -> int:
+    return int(get_redis().llen(IMPORT_KEY) or 0)
+
+
+# --------------------------------------------------------------------------- #
 # Control de velocidad (bucket con intervalo mínimo entre envíos)
 # --------------------------------------------------------------------------- #
 

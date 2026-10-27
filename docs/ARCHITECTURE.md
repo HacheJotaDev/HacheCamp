@@ -17,7 +17,7 @@ HJ Campaigns es una aplicación monorepo con dos imágenes principales y cuatro 
                        │      ┌───────┴───────────────┴──────┐      │
                        │      │  postgres:16   redis:7        │     │
                        │      └──────────┬────────────────────┘      │
-                       │   [worker]  [scheduler]  (imágenes del api)  │
+                       │   [worker]  [scheduler]  [import-worker]  │
                        └──────────────────┬──────────────────────────┘
                                           │ HTTPS (boto3)
                                           ▼
@@ -34,6 +34,7 @@ HJ Campaigns es una aplicación monorepo con dos imágenes principales y cuatro 
 | `frontend` | Node 20 (standalone Next.js) | Panel administrativo y página pública de baja | Reescribe `/api/v1/*` hacia el API: cookies sin CORS |
 | `api` | Python 3.12 (uvicorn) | API REST, autenticación, render, webhooks | Healthcheck `/api/v1/healthz` |
 | `worker` | Misma imagen que api | Consume la cola de envío con control de velocidad | Bucle BRPOP sobre Redis |
+| `import-worker` | Misma imagen que api | Importaciones masivas de contactos: procesa `hj:q:import` por lotes de 500 con commits cortos; reanuda trabajos tras reinicios | Separado del worker de envíos para que una importación de 50k no compita con el envío |
 | `scheduler` | Misma imagen que api | Campañas programadas, reintentos vencidos, reconciliación de envíos inciertos, refresco de cuota | Ciclo de 20 s |
 | `postgres` | postgres:16-alpine | Persistencia única | Sin puertos públicos |
 | `redis` | redis:7-alpine | Sesiones, cola, reintentos, caché de cuota, limitadores | AOF activado, sin puertos |

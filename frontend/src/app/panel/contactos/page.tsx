@@ -1,12 +1,12 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
   Users, Plus, Upload, Download, Search, Loader2, FileSpreadsheet, Trash2, Eye,
-  ListX,
+  ListX, CheckCircle2, XCircle, Ban, Clock,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -17,11 +17,12 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Progress } from "@/components/ui/progress";
 import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
   AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { api, Contact, ContactList, Paged } from "@/lib/api";
+import { api, Contact, ContactList, ImportJob, Paged } from "@/lib/api";
 import { EmptyState, StatusBadge, fecha, numero } from "@/components/shared";
 
 export default function ContactosPage() {
@@ -325,15 +326,125 @@ interface ImportPreview {
   muestra: { email: string }[];
 }
 
+const ETIQUETAS_ESTADO_IMPORT: Record<ImportJob["estado"], string> = {
+  pendiente: "En cola",
+  procesando: "Procesando",
+  completado: "Completada",
+  fallido: "Fallida",
+  cancelado: "Cancelada",
+};
+
+const NOTICIAS_ETIQUETA: Record<string, string> = {
+  correo_suprimido: "En supresión (dados de baja)",
+  existente_estado_dado_baja: "Ya dados de baja",
+  existente_estado_rebote: "Con rebote",
+  existente_estado_queja: "Con queja",
+};
+
+function EstadoIcon({ estado }: { estado: ImportJob["estado"] }) {
+  if (estado === "completado") return <CheckCircle2 className="h-4 w-4 text-emerald-600" />;
+  if (estado === "fallido") return <XCircle className="h-4 w-4 text-red-600" />;
+  if (estado === "cancelado") return <Ban className="h-4 w-4 text-amber-600" />;
+  if (estado === "procesando") return <Loader2 className="h-4 w-4 animate-spin text-emerald-600" />;
+  return <Clock className="h-4 w-4 text-muted-foreground" />;
+}
+
+function PanelProgreso({ job, onCancelar }: { job: ImportJob; onCancelar: (jobId: string) => void }) {
+  const activo = job.estado === "pendiente" || job.estado === "procesando";
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-2 text-sm">
+        <EstadoIcon estado={job.estado} />
+        <span className="font-medium">{ETIQUETAS_ESTADO_IMPORT[job.estado]}</span>
+        <span className="text-muted-foreground ml-auto font-mono text-xs">{job.filename}</span>
+      </div>
+      <Progress value={job.progreso_pct} />
+      <p className="text-xs text-muted-foreground">
+        {numero(job.filas_procesadas)} de {numero(job.total_filas)} filas ({job.progreso_pct}%)
+        {activo && " · el proceso continúa en segundo plano, puedes cerrar esta ventana"}
+      </p>
+      <div className="grid grid-cols-2 gap-2 text-sm">
+        {([
+          ["Creados", job.creados],
+          ["Ya existían (actualizados)", job.actualizados],
+          ["Inválidos en el archivo", job.filas_invalidas],
+          ["Duplicados descartados", job.duplicados_en_archivo],
+          ["Errores de fila", job.errores],
+        ] as [string, number][]).map(([k, v]) => (
+          <div key={k} className="rounded-lg bg-muted/60 p-2.5">
+            <p className="text-muted-foreground text-xs">{k}</p>
+            <p className="font-bold text-base">{numero(v)}</p>
+          </div>
+        ))}
+        {Object.entries(job.notices ?? {})
+          .filter(([k]) => NOTICIAS_ETIQUETA[k])
+          .map(([k, v]) => (
+            <div key={k} className="rounded-lg bg-amber-500/10 p-2.5">
+              <p className="text-xs text-amber-700">{NOTICIAS_ETIQUETA[k]}</p>
+              <p className="font-bold text-base">{numero(v)}</p>
+            </div>
+          ))}
+      </div>
+      {job.errores > 0 && job.error_samples?.length > 0 && (
+        <div className="rounded-lg border border-red-200 bg-red-500/5 p-2 text-xs space-y-1">
+          <p className="font-medium text-red-700">Primeras filas con error</p>
+          {job.error_samples.slice(0, 5).map((s, i) => (
+            <p key={i} className="font-mono break-all text-red-600">
+              {s.line ? `línea ${s.line}: ` : ""}{s.error}
+            </p>
+          ))}
+        </div>
+      )}
+      {job.estado === "fallido" && job.last_error && (
+        <p className="rounded-lg bg-red-500/10 p-2 text-xs text-red-700">{job.last_error}</p>
+      )}
+      {activo && (
+        <Button variant="outline" size="sm" className="w-full" onClick={() => onCancelar(job.job_id)}>
+          <Ban className="mr-2 h-4 w-4" /> Cancelar importación
+        </Button>
+      )}
+    </div>
+  );
+}
+
 function ImportarDialog({ onImportado }: { onImportado: () => void }) {
   const [abierto, setAbierto] = useState(false);
   const [archivo, setArchivo] = useState<File | null>(null);
   const [listId, setListId] = useState("");
   const [preview, setPreview] = useState<ImportPreview | null>(null);
-  const [resultado, setResultado] = useState<Record<string, unknown> | null>(null);
+  const [jobId, setJobId] = useState<string | null>(null);
+  const qc = useQueryClient();
   const { data: listas } = useQuery({
     queryKey: ["listas"],
     queryFn: () => api.get<ContactList[]>("/api/v1/lists"),
+  });
+
+  // Progreso del trabajo activo: sondeo mientras vive; se detiene al terminar
+  const { data: job } = useQuery({
+    queryKey: ["import-job", jobId],
+    queryFn: () => api.get<ImportJob>(`/api/v1/contacts/import/${jobId}`),
+    enabled: !!jobId,
+    refetchInterval: (q) =>
+      q.state.data && (q.state.data.estado === "pendiente" || q.state.data.estado === "procesando")
+        ? 1500 : false,
+  });
+
+  // Al terminar el trabajo: refresca contactos e historial de importaciones
+  const jobTerminado = !!job && job.estado !== "pendiente" && job.estado !== "procesando";
+  useEffect(() => {
+    if (jobTerminado) {
+      qc.invalidateQueries({ queryKey: ["contactos"] });
+      qc.invalidateQueries({ queryKey: ["import-jobs"] });
+    }
+  }, [jobTerminado, qc]);
+
+  // Últimas importaciones (para consultar progreso sin re-subir)
+  const { data: ultimas } = useQuery({
+    queryKey: ["import-jobs"],
+    queryFn: () => api.get<ImportJob[]>("/api/v1/contacts/import/jobs?limit=5"),
+    enabled: abierto,
+    refetchInterval: (q) =>
+      q.state.data?.some((j) => j.estado === "pendiente" || j.estado === "procesando") ? 3000 : false,
   });
 
   const previewMut = useMutation({
@@ -348,25 +459,32 @@ function ImportarDialog({ onImportado }: { onImportado: () => void }) {
     onError: (e: Error) => toast.error(e.message),
   });
 
-  const importar = useMutation({
+  const cancelar = useMutation({
+    mutationFn: (jid: string) => api.post<ImportJob>(`/api/v1/contacts/import/${jid}/cancel`),
+    onSuccess: () => toast.info("Cancelación solicitada"),
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  const importarDirecto = useMutation({
     mutationFn: async () => {
       const fd = new FormData();
       fd.append("archivo", archivo!);
       fd.append("consent_source", "importacion_csv");
       fd.append("list_ids", listId && listId !== "sin" ? JSON.stringify([listId]) : "[]");
-      fd.append("dry_run", "false");
-      return api.postForm<Record<string, unknown>>("/api/v1/contacts/import", fd);
+      // postForm: multipart correcto (ver comentario en previewMut)
+      return api.postForm<{ job_id: string }>("/api/v1/contacts/import", fd);
     },
     onSuccess: (res) => {
-      setResultado(res);
-      toast.success(`Importados: ${res.creados} nuevos, ${res.actualizados} existentes`);
+      setJobId(res.job_id);
+      toast.success("Importación en cola: procesando en segundo plano");
+      qc.invalidateQueries({ queryKey: ["import-jobs"] });
       onImportado();
     },
     onError: (e: Error) => toast.error(e.message),
   });
 
   const reiniciar = () => {
-    setArchivo(null); setPreview(null); setResultado(null);
+    setArchivo(null); setPreview(null); setJobId(null);
   };
 
   return (
@@ -379,11 +497,22 @@ function ImportarDialog({ onImportado }: { onImportado: () => void }) {
           <DialogTitle>Importar contactos</DialogTitle>
           <DialogDescription>
             CSV (columna <code>email</code>) o TXT (un correo por línea). Máximo 5 MB.
-            Los duplicados se detectan y descartan automáticamente.
+            El proceso corre en segundo plano: puedes cerrar esta ventana y el
+            progreso queda registrado aquí.
           </DialogDescription>
         </DialogHeader>
 
-        {!resultado ? (
+        {jobId && job ? (
+          <div className="space-y-3">
+            <PanelProgreso job={job} onCancelar={(jid) => cancelar.mutate(jid)} />
+            <DialogFooter>
+              <Button className="bg-emerald-600 hover:bg-emerald-700"
+                onClick={() => { setAbierto(false); reiniciar(); }}>
+                Cerrar
+              </Button>
+            </DialogFooter>
+          </div>
+        ) : (
           <div className="space-y-3">
             <div className="space-y-1.5">
               <Label htmlFor="csv-archivo">Archivo CSV o TXT *</Label>
@@ -425,34 +554,40 @@ function ImportarDialog({ onImportado }: { onImportado: () => void }) {
               <Button variant="outline" onClick={() => setAbierto(false)}>Cancelar</Button>
               <Button
                 className="bg-emerald-600 hover:bg-emerald-700"
-                disabled={!archivo || !preview || importar.isPending}
-                onClick={() => importar.mutate()}
+                disabled={!archivo || !preview || importarDirecto.isPending}
+                onClick={() => importarDirecto.mutate()}
               >
-                {importar.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                Importar {preview ? `(${preview.filas_validas})` : ""}
+                {importarDirecto.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                Importar {preview ? `(${numero(preview.filas_validas)})` : ""}
               </Button>
             </DialogFooter>
-          </div>
-        ) : (
-          <div className="space-y-3">
-            <div className="grid grid-cols-2 gap-2 text-sm">
-              {[
-                ["Correos importados", Number(resultado.creados) || 0],
-                ["Ya existían", Number(resultado.actualizados) || 0],
-                ["Duplicados descartados", Number(resultado.duplicados_en_archivo) || 0],
-                ["Inválidos", Number(resultado.filas_invalidas) || 0],
-              ].map(([k, v]) => (
-                <div key={String(k)} className="rounded-lg bg-muted/60 p-2.5">
-                  <p className="text-muted-foreground text-xs">{k}</p>
-                  <p className="font-bold text-base">{String(v)}</p>
+
+            {ultimas && ultimas.length > 0 && (
+              <div className="space-y-1.5 border-t pt-3">
+                <p className="text-sm font-medium">Últimas importaciones</p>
+                <div className="space-y-1">
+                  {ultimas.map((j) => (
+                    <button
+                      key={j.job_id}
+                      type="button"
+                      className="w-full rounded-lg border px-2.5 py-1.5 text-left text-xs hover:bg-muted/60"
+                      onClick={() => { setJobId(j.job_id); }}
+                    >
+                      <span className="flex items-center gap-2">
+                        <EstadoIcon estado={j.estado} />
+                        <span className="font-medium">{ETIQUETAS_ESTADO_IMPORT[j.estado]}</span>
+                        <span className="text-muted-foreground truncate">{j.filename}</span>
+                        <span className="ml-auto text-muted-foreground">
+                          {j.estado === "completado"
+                            ? `${numero(j.creados)} creados`
+                            : `${j.progreso_pct}%`}
+                        </span>
+                      </span>
+                    </button>
+                  ))}
                 </div>
-              ))}
-            </div>
-            <DialogFooter>
-              <Button className="bg-emerald-600 hover:bg-emerald-700" onClick={() => { setAbierto(false); reiniciar(); }}>
-                Cerrar
-              </Button>
-            </DialogFooter>
+              </div>
+            )}
           </div>
         )}
       </DialogContent>

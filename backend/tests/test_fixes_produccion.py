@@ -102,20 +102,14 @@ def test_import_archivo_faltante_error_identificable(client, admin_auth):
     assert "archivo" in resp.text, "El detalle 422 debe citar el campo faltante"
 
 
-def test_import_csv_con_consentimiento_minimo(client, admin_auth):
+def test_import_csv_con_consentimiento_minimo(client, admin_auth, importar_csv):
     """Flujo completo de importación con los campos que envía el frontend."""
     email = _email("imp")
     contenido = f"email\n{email}\n".encode()
-    resp = client.post(
-        "/api/v1/contacts/import",
-        files={"archivo": ("correos.csv", io.BytesIO(contenido), "text/csv")},
-        data={"consent_source": "importacion_csv", "list_ids": "[]", "dry_run": "false"},
-    )
-    assert resp.status_code == 200, resp.text
-    data = resp.json()
-    assert data["creados"] == 1
-    assert data["actualizados"] == 0
-    assert data["duplicados_en_archivo"] == 0
+    progreso = importar_csv(contenido, consent_source="importacion_csv")
+    assert progreso["creados"] == 1
+    assert progreso["actualizados"] == 0
+    assert progreso["duplicados_en_archivo"] == 0
 
 
 def test_import_csv_invalido_mensaje_comprensible(client, admin_auth):
@@ -195,7 +189,7 @@ def test_eliminar_contacto_individual_con_cascada(client, admin_auth):
         db.close()
 
 
-def test_eliminar_contacto_conserva_supresion_y_bloquea_reincorporacion(client, admin_auth):
+def test_eliminar_contacto_conserva_supresion_y_bloquea_reincorporacion(client, admin_auth, importar_csv):
     """Si el contacto tenía supresión (p. ej. por queja), al eliminarlo la
     supresión se conserva: una reimportación no lo reactiva como suscripto."""
     email = _email("supres")
@@ -221,12 +215,8 @@ def test_eliminar_contacto_conserva_supresion_y_bloquea_reincorporacion(client, 
 
     # Reimportar el mismo correo: NO debe quedar suscripto (protección por supresión)
     contenido = f"email\n{email}\n".encode()
-    r2 = client.post(
-        "/api/v1/contacts/import",
-        files={"archivo": ("re.csv", io.BytesIO(contenido), "text/csv")},
-        data={"consent_source": "importacion_csv", "dry_run": "false"},
-    )
-    assert r2.status_code == 200, r2.text
+    progreso = importar_csv(contenido, consent_source="importacion_csv")
+    assert progreso["estado"] == "completado"
     lista = client.get(f"/api/v1/contacts?q={email}").json()
     assert lista["total"] == 1
     assert lista["items"][0]["status"] == "dado_baja", (

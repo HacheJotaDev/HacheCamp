@@ -176,14 +176,20 @@ export default function EditorPlantillaPage({ params }: { params: Promise<{ id: 
   const [pruebaAbierta, setPruebaAbierta] = useState(false);
   const [versionesAbiertas, setVersionesAbiertas] = useState(false);
 
-  useEffect(() => {
+  // Sincroniza el formulario cuando llega/refresca la plantilla. Patrón oficial
+  // "ajustar estado durante el render" (react.dev/learn/you-might-not-need-an-
+  // effect): mismo disparador que el efecto anterior (cambio de identidad del
+  // objeto), pero sin setState síncrono dentro de un efecto.
+  const [plantillaVista, setPlantillaVista] = useState<Template | null | undefined>(undefined);
+  if (plantilla !== plantillaVista) {
+    setPlantillaVista(plantilla);
     if (plantilla) {
       setNombre(plantilla.name);
       setModo(plantilla.mode);
       setBloques(plantilla.blocks ?? []);
       setHtml(plantilla.html ?? "");
     }
-  }, [plantilla]);
+  }
 
   // Guardado automático (2.5 s tras cambios)
   const guardar = useMutation({
@@ -204,7 +210,6 @@ export default function EditorPlantillaPage({ params }: { params: Promise<{ id: 
     if (!sucio || !plantilla || guardar.isPending) return;
     const t = setTimeout(() => guardar.mutate(), 2500);
     return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sucio, bloques, html, nombre, modo]);
 
   const marcarSucio = useCallback(() => setSucio(true), []);

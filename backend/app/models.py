@@ -337,6 +337,77 @@ class AppSetting(Base):
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow, nullable=False)
 
 
+# ----------------------------------------------------------------------------- #
+# Importación asíncrona de contactos
+# ----------------------------------------------------------------------------- #
+
+IMPORT_JOB_STATES = ["pendiente", "procesando", "completado", "fallido", "cancelado"]
+
+
+class ImportJob(Base):
+    """Trabajo de importación masiva de contactos (asíncrono).
+
+    El API solo crea el trabajo (respuesta inmediata); un worker dedicado lo
+    procesa por lotes con commits cortos. El progreso se persiste aquí, así
+    que el frontend consulta esta fila sin bloquear y el worker puede
+    reanudar tras un reinicio desde rows_processed (idempotente).
+
+    Estados: pendiente | procesando | completado | fallido | cancelado
+    """
+    __tablename__ = "import_jobs"
+
+    id: Mapped[str] = mapped_column(GUID, primary_key=True, default=new_id)
+    filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="pendiente", nullable=False, index=True)
+
+    # Plan precalculado en la subida (parse + deduplicación en archivo)
+    total_rows: Mapped[int] = mapped_column(Integer, default=0, nullable=False)          # filas válidas a procesar
+    invalid_rows: Mapped[int] = mapped_column(Integer, default=0, nullable=False)        # filas inválidas del archivo
+    duplicates_in_file: Mapped[int] = mapped_column(Integer, default=0, nullable=False)  # duplicados dentro del archivo
+    encoding: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    headers: Mapped[Optional[List[str]]] = mapped_column(JSON, nullable=True)
+
+    # Progreso (persistente; el worker lo actualiza por lote)
+    rows_processed: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    creados: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    actualizados: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    errores: Mapped[int] = mapped_column(Integer, default=0, nullable=False)             # filas que fallaron individualmente
+    notices: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)       # agregados: correo_suprimido, existente_estado_*, ...
+    error_samples: Mapped[Optional[List[Dict[str, Any]]]] = mapped_column(JSON, nullable=True)  # primeras filas con error (muestra)
+    last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)               # error del trabajo completo
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    # Parámetros de la importación (se aplican al procesar)
+    consent_source: Mapped[Optional[str]] = mapped_column(String(60), nullable=True)
+    consent_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    list_ids: Mapped[Optional[List[str]]] = mapped_column(JSON, nullable=True)
+    tag_ids: Mapped[Optional[List[str]]] = mapped_column(JSON, nullable=True)
+
+    # Quién la pidió (auditoría desde el worker)
+    user_id: Mapped[Optional[str]] = mapped_column(GUID, nullable=True)
+    user_email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    ip: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow, nullable=False)
+    started_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime, nullable=True)
+    finished_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime, nullable=True)
+
+
+class ImportJobData(Base):
+    """Carga útil del trabajo de importación (filas prevalidadas).
+
+    Tabla aparte 1:1 para que las actualizaciones de progreso (muy frecuentes)
+    nunca reescriban el payload, que puede pesar varios MB con 100k filas.
+    """
+    __tablename__ = "import_job_data"
+
+    job_id: Mapped[str] = mapped_column(GUID, ForeignKey("import_jobs.id", ondelete="CASCADE"), primary_key=True)
+    payload: Mapped[str] = mapped_column(Text, nullable=False)  # JSON: lista de filas {"email", "first_name", ...}
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, nullable=False)
+
+
 # Estados válidos de campañas y transiciones permitidas
 CAMPAIGN_STATES = [
     "borrador", "en_revision", "programada", "en_cola", "enviando",

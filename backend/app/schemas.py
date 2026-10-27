@@ -185,24 +185,44 @@ class ConsentEventOut(ORMModel):
     created_at: datetime
 
 
-class CSVImportRequest(BaseModel):
-    consent_source: Optional[str] = Field(default=None, max_length=60, description="Origen del consentimiento (opcional)")
-    consent_text: Optional[str] = Field(default=None, max_length=2000)
-    list_ids: List[str] = []
-    tag_ids: List[str] = []
-    dry_run: bool = False
+
 
 
 class ImportResult(BaseModel):
+    """Respuesta al crear una importación asíncrona (202)."""
+    job_id: str
+    estado: str
     total_filas: int
     filas_validas: int
     filas_invalidas: int
+    duplicados_en_archivo: int
+    codificacion: str
+
+
+class ImportJobProgress(BaseModel):
+    """Estado y progreso de un trabajo de importación."""
+    job_id: str
+    filename: str
+    estado: str
+    progreso_pct: int
+    total_filas: int
+    filas_procesadas: int
+    filas_invalidas: int
+    duplicados_en_archivo: int
     creados: int
     actualizados: int
-    duplicados_en_archivo: int
+    errores: int
     notices: Dict[str, int]
-    simulacion: bool
-    codificacion: str
+    error_samples: List[Dict[str, Any]]
+    last_error: Optional[str] = None
+    attempts: int
+    cancel_requested: bool
+    encoding: Optional[str] = None
+    headers: Optional[List[str]] = None
+    user_email: Optional[str] = None
+    created_at: Optional[str] = None
+    started_at: Optional[str] = None
+    finished_at: Optional[str] = None
 
 
 class ListCreate(BaseModel):

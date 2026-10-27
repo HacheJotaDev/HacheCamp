@@ -113,11 +113,45 @@ class FakeSES:
 
 @pytest.fixture(autouse=True)
 def _clean_queue():
-    """Vacía la cola de envíos y reintentos tras cada prueba (aislamiento)."""
+    """Vacía las colas de envíos, reintentos E importaciones tras cada prueba."""
     yield
     from app.workers.redis_client import get_redis
     r = get_redis()
-    r.delete("hj:q:outbound", "hj:q:retry", "hj:q:last_send_ns")
+    r.delete("hj:q:outbound", "hj:q:retry", "hj:q:last_send_ns", "hj:q:import")
+
+
+@pytest.fixture
+def importar_csv(client, admin_auth):
+    """Sube un CSV/TXT, procesa el trabajo (simula el worker importador) y
+    devuelve el progreso final del trabajo.
+
+    El flujo real es asíncrono (el API responde 202 y el worker dedicado
+    procesa); en pruebas se invoca process_job directamente para no depender
+    de un segundo proceso.
+    """
+    def _importar(contenido: bytes, filename: str = "contactos.csv",
+                  media_type: str = "text/csv", procesar: bool = True, **form) -> dict:
+        data = {"consent_source": "", "list_ids": "[]", "tag_ids": "[]"}
+        data.update(form)
+        r = client.post(
+            "/api/v1/contacts/import",
+            files={"archivo": (filename, contenido, media_type)},
+            data=data,
+        )
+        assert r.status_code == 202, r.text
+        subida = r.json()
+        if procesar:
+            from app.services import import_jobs as import_service
+            db = SessionLocal()
+            try:
+                res = import_service.process_job(db, subida["job_id"])
+                assert res["accion"] in ("completado", "cancelado"), res
+            finally:
+                db.close()
+        prog = client.get(f"/api/v1/contacts/import/{subida['job_id']}")
+        assert prog.status_code == 200, prog.text
+        return prog.json()
+    return _importar
 
 
 @pytest.fixture

@@ -39,7 +39,10 @@ Errores: JSON `{"detail": "mensaje"}` con códigos HTTP convencionales (401 no a
 | PATCH | `/contacts/{id}` | Edición |
 | DELETE | `/contacts/{id}` | Baja + supresión global |
 | GET | `/contacts/{id}/consent` | Historial de consentimiento |
-| POST | `/contacts/import` | multipart: `archivo`, `consent_source`, `consent_text?`, `list_ids?`, `tag_ids?`, `dry_run` → resumen (creados, actualizados, inválidos, duplicados) |
+| POST | `/contacts/import` | multipart: `archivo`, `consent_source?`, `consent_text?`, `list_ids?`, `tag_ids?` → **202 asíncrono**: prevalida el archivo (parse + dedup en hilo), crea un `import_job` y lo encola; responde `{job_id, estado, total_filas, filas_validas, filas_invalidas, duplicados_en_archivo, codificacion}` |
+| GET | `/contacts/import/jobs` | últimas importaciones (progreso y estadísticas) |
+| GET | `/contacts/import/{job_id}` | progreso persistente del trabajo (sondeo del panel): `estado` pendiente|procesando|completado|fallido|cancelado, `progreso_pct`, `creados`, `actualizados`, `errores`, `notices`, `error_samples` |
+| POST | `/contacts/import/{job_id}/cancel` | cancela (inmediato si está en cola; entre lotes si está procesando) → 409 si ya terminó |
 | POST | `/contacts/import/preview` | multipart: `archivo` → encabezados detectados y muestra |
 | GET | `/contacts/export/csv` | Exportación auditada |
 
@@ -128,8 +131,12 @@ curl -b cookies.txt -X POST http://127.0.0.1:8086/api/v1/contacts \
   -H 'Content-Type: application/json' -H "X-CSRF-Token: $CSRF" \
   -d '{"email":"nuevo@dominio.com","consent_source":"formulario web"}'
 
-# Importar CSV (simulación)
+# Importar CSV (ASÍNCRONO): responde 202 al momento con {"job_id": "..."};
+# un worker dedicado lo procesa por lotes sin bloquear el API
 curl -b cookies.txt -X POST http://127.0.0.1:8086/api/v1/contacts/import \
   -H "X-CSRF-Token: $CSRF" \
-  -F archivo=@contactos.csv -F consent_source="formulario web" -F dry_run=true
+  -F archivo=@contactos.csv -F consent_source="formulario web"
+
+# Consultar progreso (sondear hasta estado=completado)
+curl -b cookies.txt http://127.0.0.1:8086/api/v1/contacts/import/$JOB_ID
 ```

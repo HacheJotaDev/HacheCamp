@@ -100,33 +100,22 @@ def test_crear_contacto_duplicado_no_duplica(client, admin_auth):
     assert r1.status_code == 201 and r2.status_code in (200, 201)
 
 
-def test_import_txt_un_correo_por_linea(client, admin_auth):
+def test_import_txt_un_correo_por_linea(client, admin_auth, importar_csv):
     contenido = "\n".join(
         [f"txt{i}-{uuid.uuid4().hex[:5]}@test.local" for i in range(4)] + ["linea-mala", ""]
     ).encode()
-    resp = client.post(
-        "/api/v1/contacts/import",
-        files={"archivo": ("contactos.txt", io.BytesIO(contenido), "text/plain")},
-        data={"consent_source": "", "dry_run": "false"},
-    )
-    assert resp.status_code == 200, resp.text
-    data = resp.json()
-    assert data["creados"] == 4
-    assert data["filas_invalidas"] == 1
+    progreso = importar_csv(contenido, filename="contactos.txt", media_type="text/plain")
+    assert progreso["estado"] == "completado"
+    assert progreso["creados"] == 4
+    assert progreso["filas_invalidas"] == 1
 
 
-def test_import_csv_duplicados_en_archivo(client, admin_auth):
+def test_import_csv_duplicados_en_archivo(client, admin_auth, importar_csv):
     email = f"csv-{uuid.uuid4().hex[:6]}@test.local"
     contenido = f"email\n{email}\n{email}\n{email}\n".encode()
-    resp = client.post(
-        "/api/v1/contacts/import",
-        files={"archivo": ("l.csv", io.BytesIO(contenido), "text/csv")},
-        data={"consent_source": "", "dry_run": "false"},
-    )
-    assert resp.status_code == 200, resp.text
-    data = resp.json()
-    assert data["creados"] == 1
-    assert data["duplicados_en_archivo"] == 2
+    progreso = importar_csv(contenido)
+    assert progreso["creados"] == 1
+    assert progreso["duplicados_en_archivo"] == 2
 
 
 def test_bulk_delete_eliminar(client, admin_auth):

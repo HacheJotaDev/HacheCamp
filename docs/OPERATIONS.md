@@ -9,6 +9,7 @@ docker compose ps                  # estado de contenedores
 bash scripts/status.sh             # salud completa + cola
 docker compose logs -f api         # logs de la API (Ctrl+C para salir)
 docker compose logs -f worker      # logs del worker de envío
+docker compose logs -f import-worker  # logs del worker de importaciones
 docker compose logs -f scheduler   # logs del scheduler
 docker compose restart api         # reiniciar un servicio
 docker compose stop                # detener todo (conserva datos)

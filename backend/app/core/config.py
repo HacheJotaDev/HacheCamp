@@ -97,6 +97,11 @@ class Settings(BaseSettings):
 
     # --- Cargas ---------------------------------------------------------------
     CSV_MAX_MB: int = 5
+    IMPORT_MAX_ROWS: int = 200_000          # filas válidas máximas por archivo
+
+    # --- Importación asíncrona -------------------------------------------------
+    IMPORT_BATCH_SIZE: int = 500            # filas por lote (un commit por lote)
+    IMPORT_LOT_RETRIES: int = 3             # reintentos de un lote antes de fallar el trabajo
 
     # --- Logging ---------------------------------------------------------------
     LOG_LEVEL: str = "INFO"

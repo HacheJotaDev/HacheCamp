@@ -1,5 +1,11 @@
 """Contactos: alta, edición, búsqueda, filtros, importación/exportación CSV,
-historial de consentimiento y bajas."""
+historial de consentimiento y bajas.
+
+La importación masiva es ASÍNCRONA: el API prevalida el archivo (en un hilo,
+sin bloquear el event loop), persiste el plan y encola un trabajo que procesa
+un worker dedicado por lotes con commits cortos. Nunca se importan 50k filas
+dentro del request: eso bloqueaba PostgreSQL (idle in transaction) y el API.
+"""
 from __future__ import annotations
 
 import csv
@@ -8,26 +14,27 @@ import json
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile, status
-from sqlalchemy import func, or_
+from sqlalchemy import or_
 from sqlalchemy.orm import Session, joinedload
+from starlette.concurrency import run_in_threadpool
 
 from app.core import security
 from app.core.audit import audit
-from app.core.config import settings
 from app.core.db import get_db, utcnow
 from app.core.deps import get_current_user
-from app.models import Contact, ContactList, Tag, User, contact_lists_rel, contact_tags_rel
+from app.models import Contact, ImportJob, User, contact_lists_rel, contact_tags_rel
 from app.schemas import (
     ConsentEventOut,
     ContactBulkDelete,
     ContactCreate,
     ContactDetailOut,
-    ContactOut,
     ContactUpdate,
+    ImportJobProgress,
     ImportResult,
 )
 from app.services import contacts as contact_service
-from app.services.csv_import import CSVImportError, import_contacts_from_csv, parse_csv_bytes
+from app.services import import_jobs as import_service
+from app.services.csv_import import CSVImportError, build_import_plan, parse_csv_bytes
 
 router = APIRouter(prefix="/contacts", tags=["Contactos"])
 
@@ -203,7 +210,7 @@ def contact_consent_history(contact_id: str, db: Session = Depends(get_db),
     return contact.consent_history
 
 
-@router.post("/import", response_model=ImportResult)
+@router.post("/import", status_code=202, response_model=ImportResult)
 async def import_csv(
     request: Request,
     archivo: UploadFile = File(...),
@@ -211,41 +218,101 @@ async def import_csv(
     consent_text: str = Form("", max_length=2000),
     list_ids: str = Form("[]"),
     tag_ids: str = Form("[]"),
-    dry_run: bool = Form(False),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """Importación CSV/TXT con validación y deduplicación automática.
+    """Importación masiva CSV/TXT ASÍNCRONA (respuesta inmediata, 202).
 
-    Acepta CSV (con encabezados) y TXT (un correo por línea). El campo de
-    consentimiento es opcional; para contactos ya suscriptos no se vuelve a
-    solicitar.
+    1. Prevalida el archivo en un HILO (parse + validación + deduplicación en
+       archivo): el event loop queda libre y el API sigue respondiendo.
+    2. Persiste el plan (import_job_data) y el trabajo (import_jobs).
+    3. Encola el trabajo en la cola Redis de importaciones (independiente de
+       la de envíos); un worker dedicado lo procesa por lotes.
+
+    El progreso se consulta con GET /contacts/import/{job_id}.
     """
     try:
         list_id_list = json.loads(list_ids)
         tag_id_list = json.loads(tag_ids)
-    except json.JSONDecodeError:
+        if not isinstance(list_id_list, list) or not isinstance(tag_id_list, list):
+            raise ValueError
+    except (json.JSONDecodeError, ValueError):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Formato de listas/etiquetas inválido")
 
     raw = await archivo.read()
+    filename = archivo.filename or "import.csv"
+
+    # Parseo pesado FUERA del event loop (50k filas ≈ segundos de CPU)
     try:
-        result = import_contacts_from_csv(
-            db, raw,
-            consent_source=consent_source or None,
-            consent_text=consent_text or None,
-            list_ids=list_id_list, tag_ids=tag_id_list,
-            dry_run=dry_run,
-        )
+        plan = await run_in_threadpool(build_import_plan, raw)
     except CSVImportError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc))
 
-    if not dry_run:
-        audit(db, "contactos_importados", user_id=user.id, user_email=user.email,
-              entity_type="contact", detail={"creados": result["creados"],
-                                             "actualizados": result["actualizados"]},
-              ip=security.client_ip(request))
-        db.commit()
-    return ImportResult(**result)
+    job = import_service.create_job(
+        db,
+        filename=filename,
+        plan=plan,
+        consent_source=consent_source or None,
+        consent_text=consent_text or None,
+        list_ids=[str(x) for x in list_id_list],
+        tag_ids=[str(x) for x in tag_id_list],
+        user_id=user.id, user_email=user.email,
+        ip=security.client_ip(request),
+    )
+    db.commit()
+
+    # Encolar tras confirmar en BD (si Redis falla, el worker reencola al
+    # arrancar gracias a recover_pending_jobs)
+    try:
+        import_service.enqueue(job.id)
+    except Exception:
+        pass  # recuperación al arrancar el worker; el trabajo queda "pendiente"
+
+    audit(db, "importacion_solicitada", user_id=user.id, user_email=user.email,
+          entity_type="import_job", entity_id=job.id,
+          detail={"archivo": filename, "filas_validas": plan["filas_validas"],
+                  "filas_invalidas": plan["filas_invalidas"]},
+          ip=security.client_ip(request))
+    db.commit()
+
+    return ImportResult(
+        job_id=job.id, estado=job.status,
+        total_filas=plan["filas_validas"] + plan["filas_invalidas"],
+        filas_validas=plan["filas_validas"],
+        filas_invalidas=plan["filas_invalidas"],
+        duplicados_en_archivo=plan["duplicados_en_archivo"],
+        codificacion=plan["encoding"],
+    )
+
+
+@router.get("/import/jobs", response_model=List[ImportJobProgress])
+def list_import_jobs(db: Session = Depends(get_db), user: User = Depends(get_current_user),
+                     limit: int = Query(10, ge=1, le=50)):
+    """Últimas importaciones (para consultar progreso desde el panel)."""
+    jobs = db.query(ImportJob).order_by(ImportJob.created_at.desc()).limit(limit).all()
+    return [import_service.get_progress(j) for j in jobs]
+
+
+@router.get("/import/{job_id}", response_model=ImportJobProgress)
+def import_job_progress(job_id: str, db: Session = Depends(get_db),
+                        user: User = Depends(get_current_user)):
+    """Progreso persistente de una importación (sondeo del frontend)."""
+    job = db.get(ImportJob, job_id)
+    if not job:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Importación no encontrada")
+    return import_service.get_progress(job)
+
+
+@router.post("/import/{job_id}/cancel", response_model=ImportJobProgress)
+def cancel_import_job(job_id: str, db: Session = Depends(get_db),
+                      user: User = Depends(get_current_user)):
+    """Solicita la cancelación (efectiva al momento o entre lotes)."""
+    job = db.get(ImportJob, job_id)
+    if not job:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Importación no encontrada")
+    if not import_service.request_cancel(db, job):
+        raise HTTPException(status.HTTP_409_CONFLICT, "La importación ya terminó")
+    return import_service.get_progress(db.get(ImportJob, job_id))
 
 
 @router.post("/import/preview")
@@ -253,7 +320,7 @@ async def import_csv_preview(archivo: UploadFile = File(...)):
     """Previsualiza el CSV/TXT (encabezados detectados y primeras filas)."""
     raw = await archivo.read()
     try:
-        headers, rows, invalid, encoding = parse_csv_bytes(raw)
+        headers, rows, invalid, encoding = await run_in_threadpool(parse_csv_bytes, raw)
     except CSVImportError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc))
     return {

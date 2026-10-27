@@ -48,6 +48,7 @@ def healthz(db: Session = Depends(get_db)):
 
 
 @router.get("/ses/status", dependencies=[Depends(get_current_user)])
+@router.get("/system/ses/status", dependencies=[Depends(get_current_user)])  # alias documentado
 def ses_status(db: Session = Depends(get_db)):
     """Estado de SES: cuotas dinámicas, reputación, identidades y configuración."""
     identities, err = ses_service.list_verified_identities() if settings.ENV != "development" else ([], "desarrollo")
@@ -102,12 +103,12 @@ def ses_status(db: Session = Depends(get_db)):
 
 
 @router.get("/audit", response_model=List[dict], dependencies=[Depends(require_admin)])
+@router.get("/system/audit", response_model=List[dict], dependencies=[Depends(require_admin)])  # alias documentado
 def list_audit(db: Session = Depends(get_db), page: int = Query(1, ge=1),
                per_page: int = Query(50, ge=1, le=200), accion: Optional[str] = None):
     query = db.query(AuditLog)
     if accion:
         query = query.filter(AuditLog.action == accion)
-    total = query.count()
     items = query.order_by(AuditLog.created_at.desc()).offset((page - 1) * per_page).limit(per_page).all()
     return [
         {
@@ -120,6 +121,7 @@ def list_audit(db: Session = Depends(get_db), page: int = Query(1, ge=1),
 
 
 @router.get("/settings", dependencies=[Depends(get_current_user)])
+@router.get("/system/settings", dependencies=[Depends(get_current_user)])  # alias documentado
 def get_settings_panel(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     stored = {s.key: s.value for s in db.query(AppSetting).all()}
     return {
@@ -131,6 +133,7 @@ def get_settings_panel(db: Session = Depends(get_db), user: User = Depends(get_c
 
 
 @router.put("/settings/{key}", dependencies=[Depends(require_admin)])
+@router.put("/system/settings/{key}", dependencies=[Depends(require_admin)])  # alias documentado
 def update_setting(key: str, payload: Dict[str, Any], request: Request,
                    db: Session = Depends(get_db), admin: User = Depends(require_admin)):
     if key not in EDITABLE_SETTINGS:
