@@ -3,14 +3,15 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core import security
 from app.core.audit import audit
 from app.core.db import get_db
 from app.core.deps import get_current_user
-from app.models import Template, TemplateVersion, User
+from app.models import Campaign, Template, TemplateVersion, User
 from app.schemas import (
     PreviewRequest,
     SendTestRequest,
@@ -26,7 +27,12 @@ from app.services.renderer import (
     render_template_string,
     validate_template_source,
 )
-from app.services.sanitizer import SanitizationError, sanitize_editor_blocks, sanitize_email_html
+from app.services.sanitizer import (
+    SanitizationError,
+    inline_email_css,
+    sanitize_editor_blocks,
+    sanitize_email_html,
+)
 
 router = APIRouter(prefix="/templates", tags=["Plantillas"])
 
@@ -137,18 +143,41 @@ def update_template(template_id: str, payload: TemplateUpdate, request: Request,
     return template
 
 
-@router.delete("/{template_id}", status_code=204)
+@router.delete("/{template_id}")
 def delete_template(template_id: str, request: Request, db: Session = Depends(get_db),
                     user: User = Depends(get_current_user)):
+    """Elimina una plantilla personalizada.
+
+    - Las plantillas del sistema no se pueden eliminar (400).
+    - Las campañas que la referenciaban NO se rompen: su contenido fue
+      congelado al crearse y la referencia pasa a nula (FK ON DELETE SET NULL).
+    - Si había campañas asociadas responde 200 con el detalle; si no, 204.
+      (El cuerpo se descartaría si la ruta declarara 204 fijo, por eso la
+      respuesta 204 se construye explícitamente con Response.)
+    """
     template = db.get(Template, template_id)
     if not template:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Plantilla no encontrada")
     if template.is_system:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "No se puede eliminar una plantilla del sistema")
-    db.delete(template)
+    campanas_asociadas = (
+        db.query(func.count(Campaign.id)).filter(Campaign.template_id == template_id).scalar() or 0
+    )
+    db.delete(template)  # las versiones se eliminan en cascada (FK CASCADE)
     audit(db, "plantilla_eliminada", user_id=user.id, user_email=user.email,
-          entity_type="template", entity_id=template_id, ip=security.client_ip(request))
+          entity_type="template", entity_id=template_id,
+          detail={"nombre": template.name, "campanas_asociadas": campanas_asociadas},
+          ip=security.client_ip(request))
     db.commit()
+    if campanas_asociadas:
+        return {
+            "detalle": (
+                f"Plantilla eliminada. {campanas_asociadas} campaña(s) la usaban: "
+                "conservan su contenido y continúan funcionando; solo se retira la referencia."
+            ),
+            "campanas_asociadas": campanas_asociadas,
+        }
+    return Response(status_code=204)
 
 
 @router.get("/{template_id}/versions", response_model=List[TemplateVersionOut])
