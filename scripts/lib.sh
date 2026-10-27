@@ -140,17 +140,26 @@ validar_configuracion() {
     fi
   done
 
-  # BIND_IP
-  case "${BIND_IP:-127.0.0.1}" in
-    127.0.0.1) : ;;  # recomendado: acceso privado por túnel SSH
-    0.0.0.0)
-      aviso "BIND_IP=0.0.0.0 expone el panel a Internet: solo con proxy inverso HTTPS delante" ;;
-    *)
-      if ! [[ "${BIND_IP}" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
-        error "BIND_IP inválido '${BIND_IP}' (usa 127.0.0.1, 0.0.0.0 o la IP del servidor)"
-        fallos=$((fallos + 1))
-      fi ;;
-  esac
+  # BIND_IP_API / BIND_IP_FRONTEND (separación API privada / panel público)
+  for par in "BIND_IP_API:API" "BIND_IP_FRONTEND:panel"; do
+    var="${par%%:*}"; que="${par##*:}"
+    valor="${!var:-127.0.0.1}"
+    case "${valor}" in
+      127.0.0.1) : ;;
+      0.0.0.0)
+        if [[ "${var}" == "BIND_IP_API" ]]; then
+          aviso "BIND_IP_API=0.0.0.0 EXPONDRÍA LA API a Internet (no es necesario: usa BIND_IP_FRONTEND para el panel)"
+          fallos=$((fallos + 1))
+        else
+          aviso "BIND_IP_FRONTEND=0.0.0.0 expone el panel a Internet: solo con proxy inverso HTTPS delante o red de confianza"
+        fi ;;
+      *)
+        if ! [[ "${valor}" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+          error "${var} inválido '${valor}' (usa 127.0.0.1, 0.0.0.0 o la IP del servidor)"
+          fallos=$((fallos + 1))
+        fi ;;
+    esac
+  done
 
   # WEBHOOK_TOKEN: opcional con la ingesta por SQS
   if [[ -z "${WEBHOOK_TOKEN:-}" ]]; then

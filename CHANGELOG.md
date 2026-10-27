@@ -88,7 +88,8 @@ métricas correctas y visibilidad de entregabilidad honesta.
 - **Monitor SES**: cuota diaria dinámica (consultada a la API, sin valores
   fijos), envíos de las últimas 24 h, velocidad máxima, reputación
   (`get_account`: estado de aplicación, envío habilitado) y errores de envío de
-  las últimas 24 h. `get_sending_quota()` no se alteró.
+  las últimas 24 h. Cuotas vía `GetAccount` (corrección de producción: ver
+  revisión 3).
 - **Navegación completa** (Panel, Contactos, Listas, Plantillas, Campañas,
   Programadas, Cola de envíos, Estadísticas, Entregabilidad, Supresión,
   Ajustes) con modo claro/oscuro, menú móvil con todas las secciones y
@@ -126,8 +127,8 @@ métricas correctas y visibilidad de entregabilidad honesta.
 | Cola en tiempo real con pausar/reanudar/cancelar | ✅ Completa (probada) |
 | Programaciones persistentes (reprogramar/cancelar) | ✅ Completa (probada) |
 | Métricas con denominadores (success/bounce/open/click) | ✅ Completa (probada) |
-| Monitor SES (cuota dinámica, reputación, errores 24 h) | ✅ Completa |
-| Eventos SES: delivery, bounce, complaint | ✅ Completa (SQS) |
+| Monitor SES (cuota dinámica, reputación, errores 24 h) | ✅ Completa (vía `GetAccount` SESv2) |
+| Eventos SES: delivery, bounce, complaint | ⏳ **Código listo (SQS), medición NO verificada en producción**: requiere crear la cola + destino de eventos y verificar el flujo completo (`docs/Eventos_SES_SQS.md`); sin configurar, los contadores permanecen en 0 |
 | **Medición real de Inbox vs Spam** | ⏳ **Pendiente**: requiere seedlist autorizada o servicio externo; la página muestra «No disponible» honestamente |
 | Aperturas/clics reales (píxeles y enlaces) | ✅ Disponible vía tracking propio (requiere imágenes habilitadas en el cliente) |
 | Despliegue real en VPS | ⏳ Pendiente de autorización (revisar PR #1 y seguir `docs/ACTUALIZACION_V2.md`)
@@ -147,6 +148,38 @@ métricas correctas y visibilidad de entregabilidad honesta.
 - La restauración de datos ya **no incluye comandos destructivos automáticos**:
   exige confirmación explícita escrita (`RESTAURAR`), restaura en un **volumen
   nuevo** apuntado con override temporal y el volumen original queda intacto.
+
+### Corregido en la revisión de producción 3 (healthchecks, SES y eventos)
+
+- **Healthchecks worker/scheduler (unhealthy con FailingStreak 210)**: la
+  imagen ejecutaba `curl 127.0.0.1:8000` en TODOS los contenedores, pero
+  worker y scheduler no exponen HTTP. Nuevo módulo `app/workers/heartbeat.py`:
+  cada ciclo del bucle registra un latido real en Redis; el healthcheck
+  (`python -m app.workers.heartbeat <nombre> --max-age N`) comprueba Redis
+  alcanzable + latido fresco (worker 120 s, scheduler 300 s), no mera
+  existencia del proceso. Scheduler ahora también apaga limpio con SIGTERM.
+  18 pruebas nuevas (128 en verde: 14 de heartbeat + 4 de cuota/envío SES).
+- **Cuota SES vía `GetAccount`**: incorporada la corrección local del VPS —
+  `get_account_sending_capabilities()` no existe en SESv2 y rompía la consulta
+  en producción. Ahora `get_account()` lee `SendQuota.{Max24HourSend,
+  SentLast24Hours, MaxSendRate}` + `SendingEnabled`, con la misma interfaz de
+  salida (sin regresiones en monitor/estadísticas). Mock de pruebas ajustado a
+  la forma real de la respuesta.
+- **Separación de puertos como en producción**: `BIND_IP_API` (127.0.0.1,
+  privada) y `BIND_IP_FRONTEND` (público en el VPS con `0.0.0.0:8085`) —
+  variables explícitas por servicio; `deploy.sh --check` las valida.
+- **Frontend**: `@tailwindcss/postcss` añadido a devDependencies (lo usaba
+  `postcss.config.mjs` sin declararlo; el build Docker fallaría limpio).
+  `next build` en verde.
+- **Permisos IAM documentados** (`docs/SES_PERMISOS.md`): el código usa SESv2
+  `SendEmail` (contenido raw) → acción `ses:SendEmail`, no `ses:SendRawEmail`
+  (v1, que es la denegada). Política mínima + verificación con
+  `simulate-principal-policy`; sin pedir credenciales ni ampliar permisos.
+- **Eventos SES honestidad** (`docs/Eventos_SES_SQS.md`): sin
+  `AWS_SQS_EVENTS_QUEUE_URL` configurada y sin verificación de punta a punta,
+  entregas/rebotes/quejas NO se miden (contadores en 0). Log del worker ahora
+  lo indica con la guía de conexión. La medición queda marcada como
+  **pendiente de verificación**, no funcional.
 
 ## [1.0.1] — 2026-10-27
 

@@ -23,6 +23,7 @@ from app.services import contacts as contact_service
 from app.services.renderer import build_context, render_campaign_email
 from app.core.tokens import click_token, unsubscribe_token
 from app.workers.redis_client import redis_ok
+from app.workers import heartbeat
 
 logger = get_logger("hj.worker")
 
@@ -194,6 +195,9 @@ def run_forever(poll_interval: int = 5) -> None:
     sqs_events.start_consumer()
     while _running:
         try:
+            # Latido de actividad real (healthcheck de Docker): se registra al
+            # principio de cada ciclo, incluso cuando la cola está vacía.
+            heartbeat.beat("worker", extra={"region": settings.AWS_REGION})
             if not redis_ok():
                 logger.error("Redis no disponible; reintentando en 5s")
                 time.sleep(poll_interval)

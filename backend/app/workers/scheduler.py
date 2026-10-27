@@ -18,8 +18,17 @@ from app.services import campaigns as campaign_service
 from app.services import queue as send_queue
 from app.services import ses as ses_service
 from app.workers.worker import reconcile_stale_sends
+from app.workers import heartbeat
 
 logger = get_logger("hj.scheduler")
+
+_running = True
+
+
+def stop() -> None:
+    """Apagado limpio (SIGTERM de docker stop)."""
+    global _running
+    _running = False
 
 
 def process_scheduled_campaigns(db) -> int:
@@ -66,8 +75,10 @@ def run_forever(interval_seconds: int = 20) -> None:
     logger.info("Scheduler iniciado")
     last_quota = 0.0
     last_reconcile = 0.0
-    while True:
+    while _running:
         try:
+            # Latido de actividad real (healthcheck de Docker): cada ciclo.
+            heartbeat.beat("scheduler")
             db = SessionLocal()
             try:
                 scheduled = process_scheduled_campaigns(db)
@@ -90,8 +101,17 @@ def run_forever(interval_seconds: int = 20) -> None:
                 db.close()
         except Exception as exc:
             logger.error("Error en ciclo del scheduler", extra={"error": type(exc).__name__})
-        time.sleep(interval_seconds)
+        # Espera fraccionada para responder a SIGTERM en <=1 s (docker stop)
+        restante = float(interval_seconds)
+        while _running and restante > 0:
+            time.sleep(min(1.0, restante))
+            restante -= 1.0
 
 
 if __name__ == "__main__":
+    import signal
+
+    # Apagado limpio con SIGTERM (docker stop) y SIGINT
+    signal.signal(signal.SIGTERM, lambda *_: stop())
+    signal.signal(signal.SIGINT, lambda *_: stop())
     run_forever()

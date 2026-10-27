@@ -5,21 +5,25 @@ Ruta del proyecto en el VPS: `/opt/hj-campaigns` (clon de `HacheJotaDev/HacheCam
 
 > Este procedimiento no toca otros proyectos del servidor (`/opt/campanas`,
 > `/opt/ses-pruebas` siguen intactos). **Tampoco modifica tu `.env`**: el panel
-> conserva el acceso que ya tienes (IP pública del VPS + puerto 8085, definido
-> por `BIND_IP`/`PORT_FRONTEND` en `/opt/hj-campaigns/.env`). Se comprueba
-> antes y después del despliegue en el paso 3.
+> conserva el acceso que ya tienes (IP pública del VPS + puerto 8085). Desde
+> esta versión la separación es explícita: la API se vincula a
+> `BIND_IP_API` (127.0.0.1, privada) y el panel a `BIND_IP_FRONTEND` (público
+> en tu VPS). Se comprueba antes y después del despliegue en el paso 3.
 
 ## 0. Comprobar el acceso actual (no cambiarlo)
 
 ```bash
 cd /opt/hj-campaigns
-grep -E '^(BIND_IP|PORT_FRONTEND|PORT_API)=' .env
+grep -E '^(BIND_IP|BIND_IP_API|BIND_IP_FRONTEND|PORT_FRONTEND|PORT_API)=' .env
 ss -ltnp | grep -E ':8085|:8086'   # anota la vinculación actual (p. ej. 0.0.0.0:8085)
 ```
 
 Anota esa salida: tras la actualización debe ser **idéntica**. Si hoy accedes
-por `http://IP-PÚBLICA:8085`, tu `.env` tiene `BIND_IP=0.0.0.0` (o la IP del
-servidor) y así debe seguir; esta actualización no lo altera.
+por `http://IP-PÚBLICA:8085` y la API queda privada, el comportamiento objetivo
+es: `BIND_IP_FRONTEND=0.0.0.0` + `BIND_IP_API=127.0.0.1` (o sin definir).
+**Añade esas dos líneas a `.env` ANTES de `docker compose up -d`** (ver paso 3):
+el nuevo compose usa variables por servicio y sin ellas el panel quedaría
+privado por defecto.
 
 ## 1. Preparación
 
@@ -103,14 +107,21 @@ gzip -t /root/respaldos/pgbase_${FECHA}.tar.gz && ls -lh /root/respaldos/
 ## 3. Actualización y despliegue
 
 > Nota: si aún no se fusionó la PR #1, sustituye `git pull origin main` por
-> `git fetch origin feature/pro-v2 && git checkout feature/pro-v2` (o mergea
-> primero la PR y usa `main`).
+> `git checkout feature/pro-v2 && git pull origin feature/pro-v2` (o mergea
+> primero la PR y usa `main`). Si tenías `docker-compose.yml` modificado
+> localmente (puertos de API/frontend), la rama ya expresa esa separación con
+> `BIND_IP_API`/`BIND_IP_FRONTEND`: conserva tu copia por si acaso
+> (`cp docker-compose.yml /root/compose.anterior.yml`), restaura el del repo
+> (`git checkout -- docker-compose.yml`) y añade al `.env`:
+> `BIND_IP_FRONTEND=0.0.0.0` (panel público) y `BIND_IP_API=127.0.0.1`
+> (API privada).
 
 ```bash
 git pull origin main          # o: git checkout v2.0.0 si se etiqueta
 docker compose build          # reconstruye backend (incluye premailer) y frontend
 docker compose up -d          # migrate corre primero (alembic upgrade head)
 docker compose ps             # postgres/redis/api/worker/scheduler/frontend Up
+                              # worker y scheduler: healthy por heartbeat (~1 min)
 docker compose logs --since 5m api worker scheduler | tail -60
 ```
 
@@ -122,8 +133,21 @@ curl -s http://127.0.0.1:8086/api/v1/healthz | head -5
 bash scripts/deploy.sh --check  # validación completa opcional
 
 # ACCESO: idéntico al anotado en el paso 0 (no debe cambiar)
-grep -E '^(BIND_IP|PORT_FRONTEND|PORT_API)=' .env
+grep -E '^(BIND_IP_API|BIND_IP_FRONTEND|PORT_FRONTEND|PORT_API)=' .env
 ss -ltnp | grep -E ':8085|:8086'
+# worker y scheduler deben pasar a "healthy" (heartbeat) en ~1-2 min:
+docker compose ps worker scheduler
+```
+
+Estado SES y eventos (honesto: solo datos reales):
+
+```bash
+curl -s http://127.0.0.1:8086/api/v1/system/ses/status | head -3
+# cuota.max_24h debe ser 50000 (vía GetAccount) y reputacion.envio_habilitado true
+docker compose logs worker | grep -i "Eventos SES por SQS" | tail -2
+# si dice "deshabilitados": entregas/rebotes/quejas NO se miden todavía;
+# conexión y verificación del flujo completo: docs/Eventos_SES_SQS.md
+# permisos IAM mínimos (ses:SendEmail, no ses:SendRawEmail): docs/SES_PERMISOS.md
 ```
 
 Abre el panel como lo haces siempre (misma URL que antes de actualizar) y

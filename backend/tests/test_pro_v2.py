@@ -444,3 +444,59 @@ def test_serie_filtrada_por_campana(client, admin_auth, db, fake_ses):
     assert len(puntos) == 14
     total_aperturas = sum(p["open"] for p in puntos)
     assert total_aperturas >= 4
+
+
+# --------------------------------------------------------------------------- #
+# Cuota SES vía GetAccount (corrección de producción: la operación
+# get_account_sending_capabilities no existe en SESv2 y rompía la consulta)
+# --------------------------------------------------------------------------- #
+
+def test_cuota_usa_get_account_con_sendquota_anidado(fake_ses):
+    from app.services import ses as ses_service
+
+    quota = ses_service.get_sending_quota(force_refresh=True)
+    assert quota["max_24h"] == 50000.0
+    assert quota["sent_last_24h"] == 0.0
+    assert quota["max_per_second"] == 14.0
+    assert quota["reputacion"] is True
+    assert quota.get("error") is None
+
+
+def test_cuota_responde_sin_clave_sendquota(fake_ses):
+    """GetAccount sin SendQuota no debe romper: valores 0 y sin error."""
+    from app.services import ses as ses_service
+
+    fake = fake_ses
+    fake.get_account = lambda: {"SendingEnabled": False}
+    quota = ses_service.get_sending_quota(force_refresh=True)
+    assert quota["max_24h"] == 0.0
+    assert quota["max_per_second"] == 1.0   # mínimo utilizable, no divide por 0
+    assert quota["reputacion"] is False
+
+
+def test_velocidad_efectiva_con_cuota_ses(fake_ses):
+    from app.core.config import settings
+    from app.services import ses as ses_service
+
+    original = settings.SES_MAX_PER_SECOND
+    try:
+        settings.SES_MAX_PER_SECOND = None
+        rate = ses_service.effective_rate_per_second()
+        assert 0.1 <= rate <= 14.0
+    finally:
+        settings.SES_MAX_PER_SECOND = original
+
+
+def test_send_email_operacion_usada(fake_ses):
+    """El código envía con SESv2 SendEmail (Content.Raw): el permiso IAM
+    necesario es ses:SendEmail (no ses:SendRawEmail, acción de SES v1)."""
+    from app.services import ses as ses_service
+
+    msg = ses_service.build_raw_message(
+        from_email="notificaciones@leisureparts4u.store", from_name="HJ",
+        to_email="dest@ejemplo.com", subject="S", html="<p>h</p>", text="h",
+    )
+    mid = ses_service.send_raw_email(msg)
+    assert mid.startswith("ses-")
+    assert len(fake_ses.sent) == 1
+    assert fake_ses.sent[0]["Content"]["Raw"]["Data"]  # contenido raw MIME

@@ -81,7 +81,14 @@ def ses_configured() -> bool:
 
 
 def get_sending_quota(force_refresh: bool = False) -> Dict[str, Any]:
-    """Cuotas reales de SES con caché en Redis."""
+    """Cuotas reales de SES con caché en Redis.
+
+    Usa `GetAccount` (operación real de la API SESv2). El sdk no ofrece
+    `GetAccountSendingCapabilities` en sesv2: llamarlo rompía la consulta
+    en producción. `GetAccount` devuelve las cuotas anidadas:
+      SendQuota: {Max24HourSend, SentLast24Hours, MaxSendRate}
+    y `SendingEnabled` al nivel raíz.
+    """
     r = get_redis()
     if not force_refresh:
         cached = r.get(QUOTA_CACHE_KEY)
@@ -91,12 +98,13 @@ def get_sending_quota(force_refresh: bool = False) -> Dict[str, Any]:
             return data
     try:
         client = _client()
-        resp = client.get_account_sending_capabilities()
+        cuenta = client.get_account()
+        send_quota = cuenta.get("SendQuota") or {}
         quota = {
-            "max_24h": float(resp.get("Max24HourSend", 0)),
-            "sent_last_24h": float(resp.get("SentLast24Hours", 0)),
-            "max_per_second": float(resp.get("MaxPerSecond", 1)),
-            "reputacion": resp.get("SendingEnabled", True),
+            "max_24h": float(send_quota.get("Max24HourSend", 0) or 0),
+            "sent_last_24h": float(send_quota.get("SentLast24Hours", 0) or 0),
+            "max_per_second": float(send_quota.get("MaxSendRate", 1) or 1),
+            "reputacion": bool(cuenta.get("SendingEnabled", False)),
             "region": settings.AWS_REGION,
             "cacheado": False,
             "actualizado": int(time.time()),
