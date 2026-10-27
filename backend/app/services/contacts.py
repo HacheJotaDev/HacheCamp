@@ -86,7 +86,10 @@ def upsert_contact(
     """Crea o actualiza un contacto. Devuelve (contacto, creado, aviso).
 
     - Duplicados: si el correo ya existe, se actualizan datos y consentimiento.
-    - Nunca reactiva un contacto dado de baja por rebote/queja/baja manual.
+    - Nunca reactiva un contacto dado de baja por rebote/queja/baja manual:
+      si existe, su estado no cambia (aviso existente_estado_*).
+    - Un correo en la lista de supresión sin contacto previo se crea como
+      dado_baja (aviso correo_suprimido): jamás pasa a suscripto.
     """
     email = normalize_email(email)
     existing = db.query(Contact).filter(Contact.email == email).first()
@@ -94,11 +97,16 @@ def upsert_contact(
     notice = ""
 
     if created:
+        # Direcciones en la lista de supresión NUNCA se activan: entran como
+        # dado_baja (mismo par estado+supresión que la baja manual). La
+        # supresión sigue siendo la autoridad: la fila queda visible para
+        # auditoría pero no es elegible para ninguna campaña.
+        suprimido = is_suppressed(db, email)
         contact = Contact(
             id=None, email=email,
             first_name=first_name, last_name=last_name,
             attributes=attributes or {},
-            status="suscripto",
+            status="dado_baja" if suprimido else "suscripto",
             consent_source=consent_source or source,
             consent_at=consent_at or utcnow(),
             consent_text=consent_text,
@@ -107,7 +115,10 @@ def upsert_contact(
         db.add(contact)
         db.flush()
         add_consent_event(db, contact, "alta", source=source,
-                          detail={"consent_source": consent_source or source})
+                          detail={"consent_source": consent_source or source,
+                                  **({"suprimido": True} if suprimido else {})})
+        if suprimido:
+            notice = "correo_suprimido"
         if consent_source:
             add_consent_event(db, contact, "consentimiento", source=consent_source,
                               detail={"texto": (consent_text or "")[:500]})
