@@ -50,10 +50,28 @@ ALLOWED_SCHEMES = {"http", "https", "mailto"}
 # Longitud máxima de HTML aceptado (protección ante cargas enormes)
 MAX_HTML_LENGTH = 500_000
 
+# Hosts/IP bloqueados en las URL del correo (defensa SSRF y legitimidad):
+# localhost explícito, rangos privados RFC 1918, loopback, link-local
+# (incluye el metadata 169.254.169.254) y CGNAT.
+_BLOQUEADOS_EXACTOS = {"localhost", "0.0.0.0", "::", "::1", "metadata.google.internal"}
+
+
+def _es_host_interno(host: str) -> bool:
+    """True si el host es loopback/privado/link-local (IPv4 notación punteada)."""
+    partes = host.split(".")
+    if len(partes) != 4 or not all(p.isdigit() and 0 <= int(p) <= 255 for p in partes):
+        return False
+    a, b = int(partes[0]), int(partes[1])
+    if a in (0, 10, 127) or a == 169 and b == 254 or a == 172 and 16 <= b <= 31:
+        return True
+    if a == 192 and b == 168 or a == 100 and 64 <= b <= 127:
+        return True
+    return False
+
 # Patrones de CSS peligroso (defensa en profundidad; los clientes de correo
 # modernos no los ejecutan, pero se eliminan por higiene)
 _DANGEROUS_CSS = re.compile(
-    r"expression\s*\(|javascript\s*:|-moz-binding|behavior\s*:@|@import",
+    r"expression\s*\(|javascript\s*:|-moz-binding|behavior\s*:|@import",
     re.IGNORECASE,
 )
 
@@ -75,11 +93,11 @@ def validate_url(url: str, *, allow_mailto: bool = True) -> bool:
         return allow_mailto and "@" in parsed.path
     if scheme not in ("http", "https"):
         return False
-    # Requiere host; bloquea metadatos internos (SSRF)
+    # Requiere host; bloquea metadatos internos y rangos privados (SSRF)
     host = (parsed.hostname or "").lower()
     if not host:
         return False
-    if host in ("localhost", "0.0.0.0") or host.endswith(".local"):
+    if host in _BLOQUEADOS_EXACTOS or host.endswith(".local") or _es_host_interno(host):
         return False
     return True
 

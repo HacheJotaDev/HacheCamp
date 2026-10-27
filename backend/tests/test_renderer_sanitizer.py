@@ -62,6 +62,28 @@ class TestURLs:
     def test_ssrf_localhost_bloqueado(self):
         assert not validate_url("http://localhost:8080/admin")
 
+    def test_ssrf_ips_internas_bloqueadas(self):
+        # Metadatos cloud, loopback por IP, RFC 1918 y CGNAT quedan bloqueados
+        for url in (
+            "http://169.254.169.254/latest/meta-data/",
+            "http://127.0.0.1:8086/api",
+            "http://10.1.2.3/interno",
+            "http://192.168.1.10/cam",
+            "http://172.16.0.5/x",
+            "http://100.64.0.1/cgnat",
+        ):
+            assert not validate_url(url), url
+
+    def test_ips_publicas_permitidas(self):
+        assert validate_url("https://8.8.8.8/ok")
+        assert validate_url("https://leisureparts4u.store/imagen.png")
+
+    def test_css_behavior_eliminado(self):
+        # behavior:url(...) (IE) y expresiones CSS se eliminan de <style> y style=
+        html = '<style>a{behavior:url(#default#time2)}</style><p style="behavior:url(x)">h</p>'
+        out = sanitize_email_html(html)
+        assert "behavior" not in out.lower()
+
 
 class TestBloques:
     def test_bloques_saneados(self):
