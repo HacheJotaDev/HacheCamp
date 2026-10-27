@@ -5,6 +5,31 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y 
 
 ## [Sin publicar]
 
+### Corregido
+
+- **"Configuración de correo" es la única fuente de verdad para TODOS los envíos**
+  (corrección de la integración anterior):
+  - El worker (envíos inmediatos **y programados**), la prueba de campañas y la
+    prueba de plantillas resuelven remitente y asunto desde la configuración
+    global **en el momento del envío**, aunque la campaña antigua tenga otros
+    valores almacenados; sus registros históricos nunca se reescriben.
+  - El backend ignora cualquier `from_email`/`from_name`/`subject` enviado por
+    el frontend (incluido el `from_name: "HJ Campaigns"` que la prueba de
+    plantillas hardcodeaba y por eso Gmail mostraba el remitente antiguo).
+  - El Subject enviado a SES es exactamente el configurado: se eliminaron los
+    prefijos `[PRUEBA]` y el fallback inventado `[Prueba] HJ Campaigns`.
+  - Formularios con valores globales en modo lectura: la creación de campañas
+    ya no edita asunto (si no hay asunto configurado no se puede continuar) y
+    los dos diálogos de prueba solo dejan editar el destinatario.
+  - En "Configuración de correo" el dominio `@leisureparts4u.store` es fijo y
+    visible: solo se edita la parte local del correo.
+  - `GET /system/mail-config` responde con `Cache-Control: no-store` y las
+    consultas React Query usan `staleTime: 0` + `refetchOnMount: "always"`:
+    guardar se refleja al reabrir cualquier formulario sin reiniciar nada.
+  - Compatibilidad: `POST /campaigns` sigue aceptando `subject`/`from_name`/
+    `from_email` de clientes antiguos, pero solo como último recurso cuando no
+    hay configuración guardada; con config guardada la config global siempre gana.
+
 ### Añadido
 
 - **Configuración de correo** (remitente y asunto predeterminados centralizados):
@@ -21,13 +46,12 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y 
     (anti inyección de cabeceras RFC 5322); longitudes acotadas. El endpoint
     genérico `PUT /settings/{key}` comparte las mismas reglas para las claves
     de correo.
-  - Las campañas nuevas cargan automáticamente estos valores; si una campaña
-    ya tiene remitente o asunto propios, no se sobrescriben. Los envíos de
-    prueba (plantillas y campañas) usan la configuración sin reintroducir
-    datos; el destinatario sigue siendo editable e independiente.
-  - 18 pruebas de regresión (`backend/tests/test_mail_config.py`), incluida la
-    verificación de la cabecera `From`/`Subject` construida para el mensaje
-    (decodificada como la mostraría Gmail).
+  - Los envíos de prueba (plantillas y campañas) usan la configuración sin
+    reintroducir datos; el destinatario sigue siendo editable e independiente
+    (ver «Corregido»: la configuración es la única fuente de verdad).
+  - 24 pruebas de regresión (`backend/tests/test_mail_config.py`), incluida la
+    verificación de las cabeceras `From`/`Subject` construidas para el mensaje
+    (decodificadas como las mostraría Gmail).
 
 ## [2.0.0] — 2026-10-27
 

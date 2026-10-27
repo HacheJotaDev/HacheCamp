@@ -31,10 +31,8 @@ export default function NuevaCampanaPage() {
   const qc = useQueryClient();
   const [paso, setPaso] = useState(1);
   const [nombre, setNombre] = useState("");
-  // Asunto: null = el usuario aún no escribió el suyo → se muestra el asunto
-  // predeterminado de "Configuración de correo". Lo que el usuario escriba
-  // nunca se sobrescribe.
-  const [asuntoPropio, setAsunto] = useState<string | null>(null);
+  // Asunto y remitente: SIEMPRE de "Configuración de correo" (única fuente de
+  // verdad para todos los envíos); aquí solo se muestran en modo lectura.
   const [categoria, setCategoria] = useState("promocional");
   const [listId, setListId] = useState("");
   const [segmentId, setSegmentId] = useState("");
@@ -55,11 +53,13 @@ export default function NuevaCampanaPage() {
   const { data: segmentos } = useQuery({
     queryKey: ["segmentos"], queryFn: () => api.get<Segment[]>("/api/v1/segments"),
   });
-  // Configuración de correo: remitente y asunto predeterminados del panel
+  // Configuración de correo: remitente y asunto globales (se recarga al
+  // abrir el formulario: staleTime 0 + refetchOnMount always)
   const { data: correoConfig } = useQuery({
     queryKey: ["mail-config"], queryFn: () => api.get<MailConfig>("/api/v1/system/mail-config"),
+    staleTime: 0, refetchOnMount: "always",
   });
-  const asunto = asuntoPropio ?? correoConfig?.subject ?? "";
+  const asunto = correoConfig?.subject ?? "";
 
   const { data: estimacion, isFetching: contando } = useQuery({
     queryKey: ["preview-destinatarios", listId, segmentId, categoria],
@@ -105,7 +105,6 @@ export default function NuevaCampanaPage() {
     mutationFn: async () => {
       const campana = await api.post<{ id: string }>("/api/v1/campaigns", {
         name: nombre,
-        subject: asunto,
         template_id: templateId || null,
         mode: modo,
         blocks: modo === "bloques" ? bloques : null,
@@ -139,6 +138,7 @@ export default function NuevaCampanaPage() {
   });
 
   const paso1Valido = Boolean(listId || segmentId);
+  // Sin asunto configurado no se puede continuar: es la fuente única de todos los envíos
   const paso2Valido = asunto.trim().length > 0;
   const paso3Valido = modo === "bloques" ? (bloques?.length ?? 0) > 0 : html.trim().length > 0;
   const paso4Valido = momento === "ahora" || (fechaHora && fechaIsoUtc());
@@ -152,7 +152,7 @@ export default function NuevaCampanaPage() {
         </Button>
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Nueva campaña</h1>
-          <p className="text-sm text-muted-foreground">Cinco pasos sencillos. El remitente se toma de la configuración.</p>
+          <p className="text-sm text-muted-foreground">Cinco pasos sencillos. Remitente y asunto vienen de la configuración.</p>
         </div>
       </div>
 
@@ -228,22 +228,32 @@ export default function NuevaCampanaPage() {
         </Card>
       )}
 
-      {/* PASO 2: Asunto */}
+      {/* PASO 2: Asunto (lectura: fuente única en Configuración de correo) */}
       {paso === 2 && (
         <Card>
           <CardContent className="p-4 space-y-3">
             <div className="space-y-1.5">
-              <Label>Asunto del correo *</Label>
-              <Input value={asunto} onChange={(e) => setAsunto(e.target.value)}
-                placeholder="Oficina especial de diciembre para ti"
-                onBlur={() => !nombre && setNombre(asunto.trim().slice(0, 60))} />
-              {correoConfig && (
+              <Label>Asunto del correo (global, no editable aquí)</Label>
+              <div className="rounded-lg border bg-muted/30 px-3 py-2.5 text-sm" aria-live="polite">
+                {asunto || <span className="text-muted-foreground">Sin asunto configurado</span>}
+              </div>
+              {asunto ? (
                 <p className="text-xs text-muted-foreground">
-                  Se enviará como <b>{correoConfig.from_name}</b> &lt;{correoConfig.from_email}&gt; · cambia el valor por defecto en{" "}
-                  <Link href="/panel/config-correo" className="text-emerald-600 hover:underline">Configuración de correo</Link>
+                  Proviene de <Link href="/panel/config-correo" className="text-emerald-600 hover:underline">Configuración de correo</Link>:
+                  es el asunto único de todos los envíos (campañas y pruebas).
+                </p>
+              ) : (
+                <p className="text-sm text-red-600" role="alert">
+                  Define primero el asunto predeterminado en <Link href="/panel/config-correo" className="underline">Configuración de correo</Link>.
                 </p>
               )}
             </div>
+            {correoConfig && (
+              <div className="rounded-lg border bg-muted/30 px-3 py-2.5 text-sm">
+                <span className="text-muted-foreground">Se enviará como:</span>{" "}
+                <b>{correoConfig.from_name}</b> <span className="text-muted-foreground">&lt;{correoConfig.from_email}&gt;</span>
+              </div>
+            )}
             <div className="space-y-1.5">
               <Label>Nombre interno (opcional)</Label>
               <Input value={nombre} onChange={(e) => setNombre(e.target.value)}
@@ -388,7 +398,7 @@ export default function NuevaCampanaPage() {
             <Resumen etiqueta="Asunto" valor={asunto} />
             <Resumen etiqueta="Remitente" valor={correoConfig
               ? `${correoConfig.from_name} <${correoConfig.from_email}>`
-              : "Configurado por defecto (notificaciones del sistema)"} />
+              : "Definido en Configuración de correo al enviar"} />
             <Resumen etiqueta="Destinatarios" valor={
               `${listId
                 ? listas?.find((l) => l.id === listId)?.name ?? "lista"

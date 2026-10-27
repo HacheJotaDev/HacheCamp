@@ -202,17 +202,18 @@ def scheduled_history(db: Session = Depends(get_db), user: User = Depends(get_cu
 
 
 def _resolver_remitente(db: Session, payload: CampaignCreate) -> tuple[str, str]:
-    """Remitente automático: usa el configurado por defecto salvo override.
+    """Remitente de la campaña: SIEMPRE "Configuración de correo" si existe.
 
-    Fuentes: "Configuración de correo" (app_settings: default_from_name /
-    default_from_email), con fallback a las constantes del proyecto.
+    Prioridad: valores guardados (app_settings: default_from_name /
+    default_from_email) > valores del payload (solo por compatibilidad con
+    clientes antiguos; el panel ya no los envía) > constantes del proyecto.
     El correo del remitente debe pertenecer al dominio verificado en SES.
     """
     guardado = mail_config.leer_guardado(db)
-    from_name = (payload.from_name or "").strip() or \
-        guardado[mail_config.KEY_FROM_NAME] or mail_config.DEFAULT_FROM_NAME
-    from_email = (payload.from_email or "").strip() or \
-        guardado[mail_config.KEY_FROM_EMAIL] or mail_config.DEFAULT_FROM_EMAIL
+    from_name = guardado[mail_config.KEY_FROM_NAME] or \
+        (payload.from_name or "").strip() or mail_config.DEFAULT_FROM_NAME
+    from_email = guardado[mail_config.KEY_FROM_EMAIL] or \
+        (payload.from_email or "").strip() or mail_config.DEFAULT_FROM_EMAIL
     if not contact_service.is_valid_email(from_email):
         raise HTTPException(status.HTTP_400_BAD_REQUEST,
                             f"El remitente por defecto no es un correo válido: {from_email}")
@@ -233,14 +234,15 @@ def create_campaign(payload: CampaignCreate, request: Request,
 
     from_name, from_email = _resolver_remitente(db, payload)
 
-    # Asunto: el propio de la campaña tiene prioridad (nunca se sobrescribe);
-    # si se omite, se usa el asunto predeterminado de "Configuración de correo".
-    subject = (payload.subject or "").strip()
+    # Asunto: SIEMPRE el predeterminado de "Configuración de correo" si existe
+    # (fuente única); el payload solo se acepta como compatibilidad con
+    # clientes antiguos cuando aún no hay asunto configurado.
+    subject = mail_config.config_efectiva(db)["subject"]
     if not subject:
-        subject = mail_config.config_efectiva(db)["subject"]
+        subject = (payload.subject or "").strip()
     if not subject:
         raise HTTPException(status.HTTP_400_BAD_REQUEST,
-                            "El asunto es obligatorio: indícalo o define un asunto "
+                            "El asunto es obligatorio: define un asunto "
                             "predeterminado en 'Configuración de correo'")
 
     blocks = None
@@ -602,28 +604,39 @@ def campaign_plain_text(campaign_id: str, db: Session = Depends(get_db),
 @router.post("/{campaign_id}/test-send")
 def campaign_test_send(campaign_id: str, payload: Dict[str, Any], request: Request,
                        db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    """Envío de prueba de la campaña a una dirección autorizada."""
+    """Envío de prueba de la campaña a una dirección autorizada.
+
+    Remitente y asunto SIEMPRE de "Configuración de correo" (valores globales
+    vigentes), aunque la campaña tenga otros almacenados; el destinatario es
+    independiente y editable. Sin prefijos: el Subject enviado a SES es
+    exactamente el asunto configurado.
+    """
     campaign = _get_campaign(db, campaign_id)
     to_email = str(payload.get("to_email", "")).strip()
     if not to_email or "@" not in to_email:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Correo de destino inválido")
     to_email = to_email.lower()
 
+    cfg = mail_config.valores_para_envio(db, subject_fallback=campaign.subject)
+    if not cfg["subject"]:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            "Define el asunto predeterminado en 'Configuración de correo'")
+
     context = {
         "contact": {"email": to_email, "first_name": "Prueba", "last_name": "",
                     "attributes": {}},
-        "campaign": {"name": campaign.name, "subject": campaign.subject},
+        "campaign": {"name": campaign.name, "subject": cfg["subject"]},
         "unsubscribe_url": "https://ejemplo.local/baja?token=PRUEBA",
         "web_view_url": "",
     }
     try:
         subject, html_final, plain = render_campaign_email(
             mode=campaign.mode, blocks=campaign.blocks, html_source=campaign.html,
-            subject=campaign.subject, context=context,
+            subject=cfg["subject"], context=context,
         )
         ses_id = ses_service.send_test_email(
-            to_email=to_email, subject=f"[PRUEBA] {subject}", html=html_final, text=plain,
-            from_email=campaign.from_email, from_name=campaign.from_name,
+            to_email=to_email, subject=subject, html=html_final, text=plain,
+            from_email=cfg["from_email"], from_name=cfg["from_name"],
             reply_to=campaign.reply_to,
         )
     except ses_service.SESNotConfigured as exc:

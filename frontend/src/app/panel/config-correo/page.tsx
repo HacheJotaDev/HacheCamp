@@ -1,10 +1,13 @@
 "use client";
 
 /**
- * Configuración de correo: remitente y asunto predeterminados del panel.
+ * Configuración de correo: única fuente de verdad de remitente y asunto.
  *
  * - Los valores se guardan en el backend (app_settings) y se cargan al abrir.
- * - Las campañas nuevas y los envíos de prueba usan estos valores automáticamente.
+ * - TODOS los envíos (campañas nuevas y existentes, inmediatos y programados,
+ *   pruebas de campañas y de plantillas) usan estos tres valores al enviar.
+ * - El dominio del correo del remitente es fijo (@leisureparts4u.store,
+ *   verificado en Amazon SES): solo se edita la parte anterior al "@".
  * - Solo los administradores pueden guardar (el backend lo exige con 403).
  */
 
@@ -16,7 +19,6 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Badge } from "@/components/ui/badge";
 import { api, MailConfig } from "@/lib/api";
 import { useAuth } from "@/lib/providers";
 
@@ -52,17 +54,22 @@ export default function ConfigCorreoPage() {
   const { data, isLoading, error: errorCarga } = useQuery({
     queryKey: ["mail-config"],
     queryFn: () => api.get<MailConfig>("/api/v1/system/mail-config"),
+    staleTime: 0, refetchOnMount: "always",
   });
 
-  const [borrador, setBorrador] = useState<Partial<Pick<MailConfig, "from_name" | "from_email" | "subject">>>({});
+  const dominio = data?.dominio ?? "leisureparts4u.store";
+
+  const [borrador, setBorrador] = useState<Partial<{ from_name: string; from_local: string; subject: string }>>({});
 
   // Estado derivado: el borrador del usuario tiene prioridad sobre los valores
   // guardados; al abrir el apartado se muestran los valores persistidos.
   const form = {
     from_name: borrador.from_name ?? data?.from_name ?? "",
-    from_email: borrador.from_email ?? data?.from_email ?? "",
+    // Solo la parte local es editable; el dominio es fijo y no negociable
+    from_local: borrador.from_local ?? (data?.from_email ? data.from_email.split("@")[0] : ""),
     subject: borrador.subject ?? data?.subject ?? "",
   };
+  const fromEmailCompleto = `${form.from_local.trim().toLowerCase()}@${dominio}`;
   const setCampo = (campo: keyof typeof form, valor: string) =>
     setBorrador((b) => ({ ...b, [campo]: valor }));
 
@@ -70,20 +77,24 @@ export default function ConfigCorreoPage() {
     mutationFn: () =>
       api.put<{ detalle: string; config: MailConfig }>("/api/v1/system/mail-config", {
         from_name: form.from_name.trim(),
-        from_email: form.from_email.trim().toLowerCase(),
+        from_email: fromEmailCompleto,
         subject: form.subject.trim(),
       }),
     onSuccess: () => {
-      toast.success("Configuración de correo guardada");
+      toast.success("Configuración de correo guardada: se aplicará a todos los envíos");
       qc.invalidateQueries({ queryKey: ["mail-config"] });
     },
     onError: (e: Error) => toast.error(e.message),
   });
 
-  const errorValidacion = validarConfigCorreo(form);
+  const errorValidacion = validarConfigCorreo({
+    from_name: form.from_name,
+    from_email: fromEmailCompleto,
+    subject: form.subject,
+  });
   const sinCambios = !data || (
     form.from_name.trim() === data.from_name &&
-    form.from_email.trim().toLowerCase() === data.from_email &&
+    fromEmailCompleto === data.from_email &&
     form.subject.trim() === data.subject
   );
 
@@ -121,8 +132,9 @@ export default function ConfigCorreoPage() {
             <AtSign className="h-4.5 w-4.5 text-emerald-600" /> Remitente y asunto predeterminados
           </CardTitle>
           <CardDescription>
-            Las campañas nuevas y los envíos de prueba usarán estos valores automáticamente.
-            Si una campaña ya tiene remitente o asunto propio, no se sobrescriben.
+            Única fuente de verdad para TODOS los envíos: campañas nuevas y existentes,
+            inmediatas y programadas, y pruebas de campañas y plantillas usan estos
+            valores en el momento de enviar.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -136,13 +148,18 @@ export default function ConfigCorreoPage() {
             </p>
           </div>
           <div className="space-y-1.5">
-            <Label htmlFor="from-email">Correo del remitente</Label>
-            <Input id="from-email" type="email" value={form.from_email}
-              onChange={(e) => setCampo("from_email", e.target.value)}
-              disabled={!esAdmin} placeholder={`notificaciones@${data?.dominio ?? "leisureparts4u.store"}`} />
+            <Label htmlFor="from-local">Correo del remitente</Label>
+            <div className="flex">
+              <Input id="from-local" value={form.from_local} spellCheck={false}
+                onChange={(e) => setCampo("from_local", e.target.value.replace(/[\s@]/g, ""))}
+                disabled={!esAdmin} placeholder="ventas" className="rounded-r-none font-mono" />
+              <span aria-hidden className="inline-flex items-center rounded-r-md border border-l-0 bg-muted px-3 text-sm font-mono text-muted-foreground select-none">
+                @{dominio}
+              </span>
+            </div>
             <p className="text-xs text-muted-foreground">
-              Debe pertenecer al dominio verificado en Amazon SES:{" "}
-              <Badge variant="outline" className="font-mono text-[10px]">@{data?.dominio ?? "leisureparts4u.store"}</Badge>
+              El dominio está fijo y verificado en Amazon SES: solo se edita la parte
+              anterior al "@" (ej.: ventas, avisos, eventos, notificaciones).
             </p>
           </div>
           <div className="space-y-1.5">
@@ -151,7 +168,7 @@ export default function ConfigCorreoPage() {
               onChange={(e) => setCampo("subject", e.target.value)}
               disabled={!esAdmin} placeholder="Novedades especiales para ti" maxLength={255} />
             <p className="text-xs text-muted-foreground">
-              Se precarga al crear una campaña; podrás editarlo en cada campaña sin problema.
+              Único asunto usado en todos los envíos de la aplicación.
             </p>
           </div>
 
@@ -163,7 +180,7 @@ export default function ConfigCorreoPage() {
             <p className="text-sm">
               <span className="text-muted-foreground">De:</span>{" "}
               <b>{form.from_name.trim() || "—"}</b>{" "}
-              <span className="text-muted-foreground">&lt;{form.from_email.trim() || "—"}&gt;</span>
+              <span className="text-muted-foreground">&lt;{fromEmailCompleto}&gt;</span>
             </p>
             <p className="text-sm">
               <span className="text-muted-foreground">Asunto:</span> {form.subject.trim() || "—"}

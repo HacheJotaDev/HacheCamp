@@ -267,15 +267,20 @@ def send_test(payload: SendTestRequest, request: Request,
               db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     """Envío de prueba a una dirección autorizada mediante SES.
 
-    Remitente y asunto son opcionales: si se omiten se usan los valores
-    guardados en "Configuración de correo" (sin reintroducirlos).
+    Remitente y asunto SIEMPRE de "Configuración de correo" (única fuente de
+    verdad): se ignoran cualquier from_email/from_name/subject que llegue en
+    la solicitud, incluso si un cliente antiguo los envía. Solo el
+    destinatario es editable e independiente.
     """
     from app.services import ses as ses_service
 
     cfg = config_efectiva(db)
-    from_email = payload.from_email or cfg["from_email"]
-    from_name = payload.from_name or cfg["from_name"]
-    subject = (payload.subject or "").strip() or cfg["subject"] or "[Prueba] HJ Campaigns"
+    from_email = cfg["from_email"]
+    from_name = cfg["from_name"]
+    subject = (cfg["subject"] or "").strip()
+    if not subject:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            "Define el asunto predeterminado en 'Configuración de correo'")
 
     context = build_context(
         contact={"email": payload.to_email, "first_name": "Prueba"},

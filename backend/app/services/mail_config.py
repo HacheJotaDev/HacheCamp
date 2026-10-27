@@ -120,6 +120,29 @@ def config_efectiva(db: Session) -> Dict[str, str]:
     }
 
 
+def valores_para_envio(db: Session, *, subject_fallback: Optional[str] = None) -> Dict[str, str]:
+    """ÚNICA fuente de verdad para TODOS los envíos mediante SES.
+
+    Resuelve los tres valores globales EN EL MOMENTO DEL ENVÍO (nunca valores
+    enviados por el frontend ni remitentes individuales por campaña):
+    - from_name / from_email: valores guardados en "Configuración de correo",
+      o las constantes del proyecto si aún no se configuró nada.
+    - subject: valor guardado; si aún no se configuró, el asunto propio de la
+      campaña existente (fallback) para no romper envíos históricos.
+
+    Lo usan el worker (envíos inmediatos y programados), la prueba de
+    campañas y la prueba de plantillas: así una campaña antigua con otros
+    valores almacenados se envía siempre con la configuración global vigente,
+    sin reescribir sus registros históricos.
+    """
+    guardado = leer_guardado(db)
+    return {
+        "from_name": guardado[KEY_FROM_NAME] or DEFAULT_FROM_NAME,
+        "from_email": guardado[KEY_FROM_EMAIL] or DEFAULT_FROM_EMAIL,
+        "subject": guardado[KEY_SUBJECT] or (subject_fallback or "").strip(),
+    }
+
+
 def guardar_config(db: Session, *, from_name: str, from_email: str,
                    subject: str) -> Dict[str, str]:
     """Valida y persiste los tres valores de forma atómica (sin commitear)."""

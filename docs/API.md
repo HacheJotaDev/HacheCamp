@@ -70,7 +70,7 @@ Errores: JSON `{"detail": "mensaje"}` con códigos HTTP convencionales (401 no a
 | POST | `/templates/{id}/restore/{version}` | Restaurar versión |
 | GET | `/templates/variables` | Catálogo de variables |
 | POST | `/templates/preview` | `{mode, blocks?, html?}` → HTML sanitizado (para iframe aislado) |
-| POST | `/templates/test-send` | `{to_email, from_email, subject, mode, blocks?/html?}` → envío real de prueba |
+| POST | `/templates/test-send` | `{to_email, mode, blocks?/html?}` → envío real de prueba; remitente y asunto SIEMPRE de `system/mail-config` (los campos de remitente/asunto del payload se ignoran) |
 
 ## Campañas
 

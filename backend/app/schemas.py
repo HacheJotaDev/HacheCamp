@@ -331,18 +331,20 @@ class PreviewRequest(BaseModel):
 
 
 class SendTestRequest(BaseModel):
+    """Solicitud de envío de prueba (plantillas).
+
+    Remitente y asunto NO se aceptan: siempre se resuelven en el backend
+    desde "Configuración de correo" (única fuente de verdad para todos los
+    envíos). Si un cliente antiguo los envía, Pydantic los ignora. Solo el
+    destinatario es editable e independiente.
+    """
     to_email: str
-    # Remitente y asunto opcionales: si se omiten se usan los valores de
-    # "Configuración de correo" (no hace falta reintroducirlos).
-    from_email: Optional[str] = None
-    from_name: Optional[str] = None
     reply_to: Optional[str] = None
-    subject: Optional[str] = None
     mode: str = Field(default="bloques", pattern="^(bloques|html)$")
     blocks: Optional[List[Dict[str, Any]]] = None
     html: Optional[str] = None
 
-    @field_validator("to_email", "from_email", "reply_to")
+    @field_validator("to_email", "reply_to")
     @classmethod
     def _norm_emails(cls, v: Optional[str]) -> Optional[str]:
         if v is None:
@@ -350,16 +352,6 @@ class SendTestRequest(BaseModel):
         if not is_valid_email(v):
             raise ValueError("Correo inválido")
         return normalize_email(v)
-
-    @field_validator("from_name", "subject")
-    @classmethod
-    def _sin_saltos_linea(cls, v: Optional[str]) -> Optional[str]:
-        if v is None:
-            return None
-        v = v.strip()
-        if "\r" in v or "\n" in v:
-            raise ValueError("No puede contener saltos de línea")
-        return v or None
 
 
 # --------------------------------------------------------------------------- #

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, Query, Request, Response
 from sqlalchemy.orm import Session
 
 from app.core import security
@@ -157,12 +157,14 @@ def update_setting(key: str, payload: Dict[str, Any], request: Request,
 
 
 @router.get("/system/mail-config", dependencies=[Depends(get_current_user)])
-def get_mail_config(db: Session = Depends(get_db)):
+def get_mail_config(db: Session = Depends(get_db), response: Response = None):
     """Configuración de correo efectiva (lectura para cualquier usuario autenticado).
 
-    La usan el apartado 'Configuración de correo' y la creación de campañas
-    para precargar remitente y asunto predeterminados.
+    La usan el apartado 'Configuración de correo', los formularios de campañas
+    y los envíos de prueba para mostrar los valores globales reales. Sin caché
+    HTTP: guardar un cambio debe reflejarse al reabrir cualquier formulario.
     """
+    response.headers["Cache-Control"] = "no-store"
     guardado = mail_config.leer_guardado(db)
     efectiva = mail_config.config_efectiva(db)
     return {
