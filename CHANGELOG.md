@@ -72,6 +72,13 @@ métricas correctas y visibilidad de entregabilidad honesta.
   «no disponible» (Amazon SES no reporta la ubicación final; no se inventan
   cifras ni se confunde Delivered con Inbox), junto con entregado al servidor
   receptor, rebotado, rechazado, quejas y ubicación desconocida.
+  **Estado: funcionalidad parcialmente implementada.** Lo que sí funciona y
+  está conectado a datos reales de SES/SQS: entregas al servidor receptor,
+  rebotes (hard/soft), rechazos, quejas (la única señal de spam que SES
+  reporta) y ubicación desconocida. **Pendiente (NO declarar como terminado):**
+  la medición real de Inbox vs Spam requiere pruebas con buzones semilla
+  (seedlist) autorizados o un servicio externo de monitorización; mientras no
+  se configure, la página lo muestra como «No disponible» con el motivo.
 - **Monitor SES**: cuota diaria dinámica (consultada a la API, sin valores
   fijos), envíos de las últimas 24 h, velocidad máxima, reputación
   (`get_account`: estado de aplicación, envío habilitado) y errores de envío de
@@ -87,20 +94,36 @@ métricas correctas y visibilidad de entregabilidad honesta.
   base de datos: no se requieren migraciones Alembic).
 - `docker-compose.yml` verificado de forma estática (YAML + anclas + redes):
   los 7 servicios (postgres, redis, migrate, api, worker, scheduler, frontend)
-  resuelven en la red interna `hj_internal`; el panel permanece privado con
-  `BIND_IP=127.0.0.1` y `PORT_FRONTEND=8085` (sin exposición HTTP pública).
+  resuelven en la red interna `hj_internal`. Los puertos usan
+  `${BIND_IP:-127.0.0.1}`: **el acceso real lo define el `.env` del VPS y esta
+  versión no lo cambia** (el procedimiento de `docs/ACTUALIZACION_V2.md` lo
+  comprueba antes y después del despliegue).
 - `frontend/tsconfig.json`: `typeRoots` fijado localmente (evita resolución de
   tipos desde directorios superiores).
 
 ### Pruebas
 
-- Suite backend: **104 pruebas** (80 previas + 24 nuevas en
-  `tests/test_pro_v2.py`): sanitizador/CSS inline (5), contactos solo-email e
-  importación TXT/dedup/borrado masivo (8), preview de destinatarios y remitente
-  automático (2), programar/reprogramar/cancelar/zona horaria (2), cola con
-  pausa/reanudación (2), métricas con denominadores (3), entregabilidad (1) y
-  serie filtrada (1). Todas en verde con SES/SQS simulados.
+- Suite backend: **107 pruebas** (80 previas + 24 nuevas en
+  `tests/test_pro_v2.py` + 3 de endurecimiento de seguridad: bloqueo SSRF de
+  IPs internas/metadata, CSS `behavior:url` eliminado). Todas en verde con
+  SES/SQS simulados.
 - Frontend: `next build` completo en verde con todas las páginas nuevas.
+
+### Estado de las funciones (v2.0.0)
+
+| Función | Estado |
+|---|---|
+| Contactos solo-email, import CSV/TXT, dedup, borrado masivo | ✅ Completa (probada) |
+| Asistente de campañas en 5 pasos con conteo previo | ✅ Completa (probada) |
+| CSS `<style>` conservado e inlineado (Premailer) | ✅ Completa (probada) |
+| Cola en tiempo real con pausar/reanudar/cancelar | ✅ Completa (probada) |
+| Programaciones persistentes (reprogramar/cancelar) | ✅ Completa (probada) |
+| Métricas con denominadores (success/bounce/open/click) | ✅ Completa (probada) |
+| Monitor SES (cuota dinámica, reputación, errores 24 h) | ✅ Completa |
+| Eventos SES: delivery, bounce, complaint | ✅ Completa (SQS) |
+| **Medición real de Inbox vs Spam** | ⏳ **Pendiente**: requiere seedlist autorizada o servicio externo; la página muestra «No disponible» honestamente |
+| Aperturas/clics reales (píxeles y enlaces) | ✅ Disponible vía tracking propio (requiere imágenes habilitadas en el cliente) |
+| Despliegue real en VPS | ⏳ Pendiente de autorización (revisar PR #1 y seguir `docs/ACTUALIZACION_V2.md`)
 
 ## [1.0.1] — 2026-10-27
 
