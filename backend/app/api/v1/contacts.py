@@ -19,6 +19,7 @@ from app.core.deps import get_current_user
 from app.models import Contact, ContactList, Tag, User, contact_lists_rel, contact_tags_rel
 from app.schemas import (
     ConsentEventOut,
+    ContactBulkDelete,
     ContactCreate,
     ContactDetailOut,
     ContactOut,
@@ -76,6 +77,11 @@ def list_contacts(
 @router.post("", response_model=ContactDetailOut, status_code=201)
 def create_contact(payload: ContactCreate, request: Request,
                    db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Alta simplificada: el correo es el único dato obligatorio.
+
+    No se vuelve a pedir consentimiento a contactos ya suscriptos; el estado
+    y las bajas existentes se conservan tal cual.
+    """
     contact, created, notice = contact_service.upsert_contact(
         db, payload.email,
         first_name=payload.first_name, last_name=payload.last_name,
@@ -90,6 +96,46 @@ def create_contact(payload: ContactCreate, request: Request,
     db.commit()
     db.refresh(contact)
     return contact
+
+
+@router.post("/bulk-delete", response_model=dict)
+def bulk_delete_contacts(payload: ContactBulkDelete, request: Request,
+                         db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Eliminación masiva de contactos (requiere confirmación explícita).
+
+    - modo=eliminar: borra los registros y sus mensajes/eventos asociados.
+    - modo=dar_baja: los da de baja y los añade a supresión (nunca reciben
+      campañas de nuevo); conservan el historial.
+    """
+    if not payload.confirmar:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            "Falta la confirmación explícita de la eliminación masiva")
+    ids = list(dict.fromkeys(payload.ids))  # deduplica conservando orden
+    encontrados = db.query(Contact).filter(Contact.id.in_(ids)).all()
+    if not encontrados:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Ningún contacto pertenece a la selección")
+
+    if payload.modo == "dar_baja":
+        for contact in encontrados:
+            if contact.status != "suscripto":
+                continue
+            contact_service.suppress_email(db, contact.email, reason="baja", source="manual")
+            contact.status = "dado_baja"
+            contact.unsubscribed_at = utcnow()
+            contact_service.add_consent_event(db, contact, "baja", source="manual",
+                                              detail={"por": user.email, "masivo": True})
+        procesados = [c.id for c in encontrados if c.status == "dado_baja"]
+    else:
+        procesados = [c.id for c in encontrados]
+        for contact in encontrados:
+            db.delete(contact)  # cascada: mensajes, eventos y consent_history
+
+    audit(db, "contactos_eliminados_masivo" if payload.modo == "eliminar" else "contactos_dados_baja_masivo",
+          user_id=user.id, user_email=user.email, entity_type="contact",
+          detail={"cantidad": len(procesados), "modo": payload.modo},
+          ip=security.client_ip(request))
+    db.commit()
+    return {"procesados": len(procesados), "solicitados": len(ids), "modo": payload.modo}
 
 
 @router.get("/{contact_id}", response_model=ContactDetailOut)
@@ -161,7 +207,7 @@ def contact_consent_history(contact_id: str, db: Session = Depends(get_db),
 async def import_csv(
     request: Request,
     archivo: UploadFile = File(...),
-    consent_source: str = Form(..., min_length=2, max_length=60),
+    consent_source: str = Form("", max_length=60),
     consent_text: str = Form("", max_length=2000),
     list_ids: str = Form("[]"),
     tag_ids: str = Form("[]"),
@@ -169,7 +215,12 @@ async def import_csv(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """Importación CSV con validación, duplicados y registro de consentimiento."""
+    """Importación CSV/TXT con validación y deduplicación automática.
+
+    Acepta CSV (con encabezados) y TXT (un correo por línea). El campo de
+    consentimiento es opcional; para contactos ya suscriptos no se vuelve a
+    solicitar.
+    """
     try:
         list_id_list = json.loads(list_ids)
         tag_id_list = json.loads(tag_ids)
@@ -180,7 +231,7 @@ async def import_csv(
     try:
         result = import_contacts_from_csv(
             db, raw,
-            consent_source=consent_source,
+            consent_source=consent_source or None,
             consent_text=consent_text or None,
             list_ids=list_id_list, tag_ids=tag_id_list,
             dry_run=dry_run,
@@ -191,8 +242,7 @@ async def import_csv(
     if not dry_run:
         audit(db, "contactos_importados", user_id=user.id, user_email=user.email,
               entity_type="contact", detail={"creados": result["creados"],
-                                             "actualizados": result["actualizados"],
-                                             "fuente": consent_source},
+                                             "actualizados": result["actualizados"]},
               ip=security.client_ip(request))
         db.commit()
     return ImportResult(**result)
@@ -200,7 +250,7 @@ async def import_csv(
 
 @router.post("/import/preview")
 async def import_csv_preview(archivo: UploadFile = File(...)):
-    """Previsualiza el CSV (encabezados detectados y primeras filas)."""
+    """Previsualiza el CSV/TXT (encabezados detectados y primeras filas)."""
     raw = await archivo.read()
     try:
         headers, rows, invalid, encoding = parse_csv_bytes(raw)

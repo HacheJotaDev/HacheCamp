@@ -58,8 +58,34 @@ def _map_headers(header: List[str]) -> Dict[str, int]:
     return mapping
 
 
-def parse_csv_bytes(raw: bytes) -> Tuple[List[str], List[Dict[str, Any]]]:
-    """Devuelve (encabezados normalizados, filas como dicts)."""
+def _parece_email(texto: str) -> bool:
+    from app.services.contacts import is_valid_email
+    return bool(texto) and "@" in texto and is_valid_email(texto.strip().lower())
+
+
+def _parse_txt(text: str, encoding: str) -> Tuple[List[str], List[Dict[str, Any]], int, str]:
+    """Procesa un TXT con un correo por línea (sin encabezados)."""
+    rows: List[Dict[str, Any]] = []
+    invalid = 0
+    for line_no, line in enumerate(text.splitlines(), start=1):
+        email = normalize_email(line)
+        if not email or not is_valid_email(email):
+            if email or line.strip():  # solo cuenta líneas no vacías como inválidas
+                invalid += 1
+            continue
+        rows.append({"email": email, "line": line_no})
+        if len(rows) > 100_000:
+            raise CSVImportError("El archivo contiene más de 100.000 filas válidas")
+    return ["email"], rows, invalid, encoding
+
+
+def parse_csv_bytes(raw: bytes) -> Tuple[List[str], List[Dict[str, Any]], int, str]:
+    """Devuelve (encabezados normalizados, filas como dicts, inválidas, encoding).
+
+    Acepta dos formatos:
+    - CSV con encabezados (columna email obligatoria; aliases reconocidos).
+    - TXT plano: un correo por línea, sin encabezados.
+    """
     max_bytes = settings.CSV_MAX_MB * 1024 * 1024
     if len(raw) > max_bytes:
         raise CSVImportError(f"El archivo excede el límite de {settings.CSV_MAX_MB} MB")
@@ -81,8 +107,13 @@ def parse_csv_bytes(raw: bytes) -> Tuple[List[str], List[Dict[str, Any]]]:
 
     mapping = _map_headers(header)
     if "email" not in mapping:
+        # Formato TXT: primera celda con aspecto de correo => un correo por línea
+        primera_celda = (header[0] if header else "").strip()
+        if _parece_email(primera_celda):
+            return _parse_txt(text, encoding)
         raise CSVImportError(
-            "Falta la columna 'email' (acepta: email, correo, mail, e-mail)"
+            "Falta la columna 'email' (acepta: email, correo, mail, e-mail) "
+            "o el archivo no es un TXT de correos (un correo por línea)"
         )
 
     extra_columns: Dict[int, str] = {

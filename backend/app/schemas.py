@@ -110,11 +110,18 @@ class SessionOut(BaseModel):
 
 
 class ContactCreate(BaseModel):
+    """Alta simplificada: el correo electrónico es el único dato obligatorio.
+
+    Los campos de consentimiento quedan opcionales para mantener la
+    compatibilidad con integraciones existentes; el registro interno usa
+    la fuente del propio alta (manual/importacion_csv) sin inventar
+    autorizaciones.
+    """
     email: str
     first_name: Optional[str] = Field(default=None, max_length=120)
     last_name: Optional[str] = Field(default=None, max_length=120)
     attributes: Optional[Dict[str, Any]] = None
-    consent_source: str = Field(min_length=2, max_length=60)
+    consent_source: Optional[str] = Field(default=None, max_length=60)
     consent_text: Optional[str] = Field(default=None, max_length=2000)
     list_ids: List[str] = []
     tag_ids: List[str] = []
@@ -125,6 +132,20 @@ class ContactCreate(BaseModel):
         if not is_valid_email(v):
             raise ValueError("Correo inválido")
         return normalize_email(v)
+
+    @field_validator("consent_source")
+    @classmethod
+    def _norm_consent(cls, v: Optional[str]) -> Optional[str]:
+        if v is None or v.strip() == "":
+            return None
+        return v.strip()[:60]
+
+
+class ContactBulkDelete(BaseModel):
+    """Eliminación masiva de contactos con confirmación explícita."""
+    ids: List[str] = Field(min_length=1, max_length=1000)
+    modo: str = Field(default="eliminar", pattern="^(eliminar|dar_baja)$")
+    confirmar: bool
 
 
 class ContactUpdate(BaseModel):
@@ -165,7 +186,7 @@ class ConsentEventOut(ORMModel):
 
 
 class CSVImportRequest(BaseModel):
-    consent_source: str = Field(min_length=2, max_length=60, description="Origen del consentimiento")
+    consent_source: Optional[str] = Field(default=None, max_length=60, description="Origen del consentimiento (opcional)")
     consent_text: Optional[str] = Field(default=None, max_length=2000)
     list_ids: List[str] = []
     tag_ids: List[str] = []
@@ -337,8 +358,9 @@ class SendTestRequest(BaseModel):
 class CampaignCreate(BaseModel):
     name: str = Field(min_length=2, max_length=160)
     subject: str = Field(min_length=1, max_length=255)
-    from_name: str = Field(min_length=2, max_length=120)
-    from_email: str
+    # Remitente opcional: si se omite se usa el configurado por defecto
+    from_name: Optional[str] = Field(default=None, max_length=120)
+    from_email: Optional[str] = None
     reply_to: Optional[str] = None
     template_id: Optional[str] = None
     mode: str = Field(default="bloques", pattern="^(bloques|html)$")
@@ -353,7 +375,7 @@ class CampaignCreate(BaseModel):
     @field_validator("from_email", "reply_to")
     @classmethod
     def _norm_emails(cls, v: Optional[str]) -> Optional[str]:
-        if v is None:
+        if v is None or v == "":
             return None
         if not is_valid_email(v):
             raise ValueError("Correo inválido")
@@ -415,6 +437,7 @@ class CampaignDetailOut(CampaignOut):
     html: Optional[str] = None
     plain_text: Optional[str] = None
     progreso: Optional[Dict[str, Any]] = None
+    metricas: Optional[Dict[str, Any]] = None
 
 
 class CampaignAction(BaseModel):
@@ -443,6 +466,13 @@ class CampaignHistoryOut(ORMModel):
 
 class RecipientsEstimate(BaseModel):
     destinatarios: int
+
+
+class RecipientsPreview(BaseModel):
+    """Solicitud de conteo de destinatarios antes de crear la campaña."""
+    list_id: Optional[str] = None
+    segment_id: Optional[str] = None
+    category: str = Field(default="promocional", pattern="^(promocional|transaccional)$")
 
 
 # --------------------------------------------------------------------------- #
