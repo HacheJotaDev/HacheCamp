@@ -15,6 +15,7 @@ from app.core.db import SessionLocal, utcnow
 from app.core.logging_conf import get_logger, setup_logging
 from app.models import Campaign, CampaignMessage, Contact
 from app.services import campaigns as campaign_service
+from app.services import mail_config
 from app.services import queue as send_queue
 from app.services import ses as ses_service
 from app.services import events as events_service
@@ -23,6 +24,7 @@ from app.services import contacts as contact_service
 from app.services.renderer import build_context, render_campaign_email
 from app.core.tokens import click_token, unsubscribe_token
 from app.workers.redis_client import redis_ok
+from app.workers import heartbeat
 
 logger = get_logger("hj.worker")
 
@@ -35,10 +37,17 @@ def stop() -> None:
 
 
 def _render_and_send(db, msg: CampaignMessage, campaign: Campaign) -> str:
-    """Renderiza el mensaje para el contacto y lo envía. Devuelve MessageId SES."""
+    """Renderiza el mensaje para el contacto y lo envía. Devuelve MessageId SES.
+
+    Remitente y asunto SIEMPRE de "Configuración de correo" (valores globales
+    vigentes en el momento del envío), aunque la campaña antigua tenga otros
+    almacenados; sus registros históricos no se reescriben.
+    """
     contact = db.get(Contact, msg.contact_id)
     if not contact:
         raise ValueError(f"Contacto inexistente {msg.contact_id}")
+
+    cfg = mail_config.valores_para_envio(db, subject_fallback=campaign.subject)
 
     unsub_token = unsubscribe_token(contact.id, campaign.id)
     unsub_url = f"{settings.PUBLIC_BASE_URL.rstrip('/')}/baja?token={unsub_token}"
@@ -48,7 +57,7 @@ def _render_and_send(db, msg: CampaignMessage, campaign: Campaign) -> str:
             "email": contact.email, "first_name": contact.first_name,
             "last_name": contact.last_name, "attributes": contact.attributes,
         },
-        campaign={"name": campaign.name, "subject": campaign.subject},
+        campaign={"name": campaign.name, "subject": cfg["subject"]},
         unsubscribe_url=unsub_url,
     )
 
@@ -60,13 +69,13 @@ def _render_and_send(db, msg: CampaignMessage, campaign: Campaign) -> str:
         mode=campaign.mode,
         blocks=campaign.blocks,
         html_source=campaign.html,
-        subject=campaign.subject,
+        subject=cfg["subject"],
         context=context,
         click_signer=signer if campaign.category == "promocional" else None,
     )
 
     raw = ses_service.build_raw_message(
-        from_email=campaign.from_email, from_name=campaign.from_name,
+        from_email=cfg["from_email"], from_name=cfg["from_name"],
         to_email=msg.email, subject=subject, html=html_final, text=plain,
         reply_to=campaign.reply_to,
         unsubscribe_url=unsub_url if campaign.category == "promocional" else None,
@@ -194,6 +203,9 @@ def run_forever(poll_interval: int = 5) -> None:
     sqs_events.start_consumer()
     while _running:
         try:
+            # Latido de actividad real (healthcheck de Docker): se registra al
+            # principio de cada ciclo, incluso cuando la cola está vacía.
+            heartbeat.beat("worker", extra={"region": settings.AWS_REGION})
             if not redis_ok():
                 logger.error("Redis no disponible; reintentando en 5s")
                 time.sleep(poll_interval)

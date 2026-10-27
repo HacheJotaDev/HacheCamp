@@ -33,7 +33,7 @@ import { Badge } from "@/components/ui/badge";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Separator } from "@/components/ui/separator";
 import { cn } from "@/lib/utils";
-import { api, EditorBlock, Template, TemplateVersion } from "@/lib/api";
+import { api, EditorBlock, MailConfig, Template, TemplateVersion } from "@/lib/api";
 
 // --------------------------------------------------------------------------- //
 // Catálogo de bloques
@@ -235,10 +235,11 @@ export default function EditorPlantillaPage({ params }: { params: Promise<{ id: 
   });
 
   const enviarPrueba = useMutation({
-    mutationFn: (vals: { to_email: string; from_email: string; subject: string }) =>
+    // Remitente y asunto los resuelve el backend desde "Configuración de
+    // correo" (única fuente de verdad); solo se envía el destinatario.
+    mutationFn: (vals: { to_email: string }) =>
       api.post<{ detalle: string }>("/api/v1/templates/test-send", {
-        ...vals,
-        from_name: "HJ Campaigns",
+        to_email: vals.to_email,
         mode: modo, blocks: modo === "bloques" ? bloques : undefined,
         html: modo === "html" ? html : undefined,
       }),
@@ -470,13 +471,17 @@ function DialogoPrueba({
   abierto, onCerrar, onEnviar, pendiente,
 }: {
   abierto: boolean; onCerrar: () => void;
-  onEnviar: (v: { to_email: string; from_email: string; subject: string }) => void;
+  onEnviar: (v: { to_email: string }) => void;
   pendiente: boolean;
 }) {
   const [to, setTo] = useState("");
-  const [from, setFrom] = useState("notificaciones@leisureparts4u.store");
-  const [asunto, setAsunto] = useState("[Prueba] HJ Campaigns");
-  const valido = to.includes("@") && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(to) && from.includes("@");
+  // Remitente y asunto: únicos y globales (solo lectura), desde el backend.
+  const { data: correoConfig } = useQuery({
+    queryKey: ["mail-config"],
+    queryFn: () => api.get<MailConfig>("/api/v1/system/mail-config"),
+    staleTime: 0, refetchOnMount: "always", enabled: abierto,
+  });
+  const valido = to.includes("@") && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(to);
   return (
     <Dialog open={abierto} onOpenChange={(v) => !v && onCerrar()}>
       <DialogContent>
@@ -491,19 +496,25 @@ function DialogoPrueba({
           <div className="space-y-1.5">
             <Label>Destinatario *</Label>
             <Input type="email" value={to} onChange={(e) => setTo(e.target.value)} placeholder="tu@correo.com" />
+            <p className="text-xs text-muted-foreground">El destinatario es independiente y editable.</p>
           </div>
-          <div className="space-y-1.5">
-            <Label>Remitente (verificado en SES)</Label>
-            <Input value={from} onChange={(e) => setFrom(e.target.value)} />
-          </div>
-          <div className="space-y-1.5">
-            <Label>Asunto</Label>
-            <Input value={asunto} onChange={(e) => setAsunto(e.target.value)} />
+          <div className="rounded-lg border bg-muted/30 p-3 text-sm space-y-1">
+            <p>
+              <span className="text-muted-foreground">De:</span>{" "}
+              <b>{correoConfig?.from_name ?? "…"}</b>{" "}
+              <span className="text-muted-foreground">&lt;{correoConfig?.from_email ?? "…"}&gt;</span>
+            </p>
+            <p>
+              <span className="text-muted-foreground">Asunto:</span> {correoConfig?.subject || "—"}
+            </p>
+            <p className="text-xs text-muted-foreground">
+              Valores globales de Configuración de correo; se aplican en el momento del envío.
+            </p>
           </div>
         </div>
         <DialogFooter>
           <Button variant="outline" onClick={onCerrar}>Cancelar</Button>
-          <Button className="bg-emerald-600 hover:bg-emerald-700" disabled={!valido || pendiente} onClick={() => onEnviar({ to_email: to, from_email: from, subject: asunto })}>
+          <Button className="bg-emerald-600 hover:bg-emerald-700" disabled={!valido || pendiente} onClick={() => onEnviar({ to_email: to })}>
             {pendiente && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
             Enviar prueba
           </Button>

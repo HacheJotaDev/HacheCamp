@@ -3,14 +3,15 @@ from __future__ import annotations
 
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core import security
 from app.core.audit import audit
 from app.core.db import get_db
 from app.core.deps import get_current_user
-from app.models import Template, TemplateVersion, User
+from app.models import Campaign, Template, TemplateVersion, User
 from app.schemas import (
     PreviewRequest,
     SendTestRequest,
@@ -19,6 +20,7 @@ from app.schemas import (
     TemplateUpdate,
     TemplateVersionOut,
 )
+from app.services.mail_config import config_efectiva
 from app.services.renderer import (
     build_context,
     blocks_to_html,
@@ -26,7 +28,12 @@ from app.services.renderer import (
     render_template_string,
     validate_template_source,
 )
-from app.services.sanitizer import SanitizationError, sanitize_editor_blocks, sanitize_email_html
+from app.services.sanitizer import (
+    SanitizationError,
+    inline_email_css,
+    sanitize_editor_blocks,
+    sanitize_email_html,
+)
 
 router = APIRouter(prefix="/templates", tags=["Plantillas"])
 
@@ -137,18 +144,41 @@ def update_template(template_id: str, payload: TemplateUpdate, request: Request,
     return template
 
 
-@router.delete("/{template_id}", status_code=204)
+@router.delete("/{template_id}")
 def delete_template(template_id: str, request: Request, db: Session = Depends(get_db),
                     user: User = Depends(get_current_user)):
+    """Elimina una plantilla personalizada.
+
+    - Las plantillas del sistema no se pueden eliminar (400).
+    - Las campañas que la referenciaban NO se rompen: su contenido fue
+      congelado al crearse y la referencia pasa a nula (FK ON DELETE SET NULL).
+    - Si había campañas asociadas responde 200 con el detalle; si no, 204.
+      (El cuerpo se descartaría si la ruta declarara 204 fijo, por eso la
+      respuesta 204 se construye explícitamente con Response.)
+    """
     template = db.get(Template, template_id)
     if not template:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Plantilla no encontrada")
     if template.is_system:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "No se puede eliminar una plantilla del sistema")
-    db.delete(template)
+    campanas_asociadas = (
+        db.query(func.count(Campaign.id)).filter(Campaign.template_id == template_id).scalar() or 0
+    )
+    db.delete(template)  # las versiones se eliminan en cascada (FK CASCADE)
     audit(db, "plantilla_eliminada", user_id=user.id, user_email=user.email,
-          entity_type="template", entity_id=template_id, ip=security.client_ip(request))
+          entity_type="template", entity_id=template_id,
+          detail={"nombre": template.name, "campanas_asociadas": campanas_asociadas},
+          ip=security.client_ip(request))
     db.commit()
+    if campanas_asociadas:
+        return {
+            "detalle": (
+                f"Plantilla eliminada. {campanas_asociadas} campaña(s) la usaban: "
+                "conservan su contenido y continúan funcionando; solo se retira la referencia."
+            ),
+            "campanas_asociadas": campanas_asociadas,
+        }
+    return Response(status_code=204)
 
 
 @router.get("/{template_id}/versions", response_model=List[TemplateVersionOut])
@@ -225,7 +255,7 @@ def preview_template(payload: PreviewRequest, user: User = Depends(get_current_u
     )
     if payload.mode == "html":
         raw = payload.html or ""
-        html = sanitize_email_html(render_template_string(raw, context))
+        html = inline_email_css(sanitize_email_html(render_template_string(raw, context)))
     else:
         html = blocks_to_html(payload.blocks or [], click_signer=None)
         html = render_template_string(html, context)
@@ -235,26 +265,40 @@ def preview_template(payload: PreviewRequest, user: User = Depends(get_current_u
 @router.post("/test-send")
 def send_test(payload: SendTestRequest, request: Request,
               db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    """Envío de prueba a una dirección autorizada mediante SES."""
+    """Envío de prueba a una dirección autorizada mediante SES.
+
+    Remitente y asunto SIEMPRE de "Configuración de correo" (única fuente de
+    verdad): se ignoran cualquier from_email/from_name/subject que llegue en
+    la solicitud, incluso si un cliente antiguo los envía. Solo el
+    destinatario es editable e independiente.
+    """
     from app.services import ses as ses_service
+
+    cfg = config_efectiva(db)
+    from_email = cfg["from_email"]
+    from_name = cfg["from_name"]
+    subject = (cfg["subject"] or "").strip()
+    if not subject:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            "Define el asunto predeterminado en 'Configuración de correo'")
 
     context = build_context(
         contact={"email": payload.to_email, "first_name": "Prueba"},
-        campaign={"name": "Prueba", "subject": payload.subject},
+        campaign={"name": "Prueba", "subject": subject},
         unsubscribe_url="https://ejemplo.local/baja?token=PRUEBA",
     )
     try:
-        subject, html_final, plain = render_campaign_email(
+        subject_render, html_final, plain = render_campaign_email(
             mode=payload.mode, blocks=payload.blocks, html_source=payload.html,
-            subject=payload.subject, context=context,
+            subject=subject, context=context,
         )
     except SanitizationError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc))
 
     try:
         ses_id = ses_service.send_test_email(
-            to_email=payload.to_email, subject=subject, html=html_final, text=plain,
-            from_email=payload.from_email, from_name=payload.from_name,
+            to_email=payload.to_email, subject=subject_render, html=html_final, text=plain,
+            from_email=from_email, from_name=from_name,
             reply_to=payload.reply_to,
         )
     except ses_service.SESNotConfigured as exc:

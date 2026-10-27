@@ -3,6 +3,268 @@
 Todas las cambios notables de HJ Campaigns se documentan aquí.
 Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y versionado SemVer.
 
+## [Sin publicar]
+
+### Corregido
+
+- **"Configuración de correo" es la única fuente de verdad para TODOS los envíos**
+  (corrección de la integración anterior):
+  - El worker (envíos inmediatos **y programados**), la prueba de campañas y la
+    prueba de plantillas resuelven remitente y asunto desde la configuración
+    global **en el momento del envío**, aunque la campaña antigua tenga otros
+    valores almacenados; sus registros históricos nunca se reescriben.
+  - El backend ignora cualquier `from_email`/`from_name`/`subject` enviado por
+    el frontend (incluido el `from_name: "HJ Campaigns"` que la prueba de
+    plantillas hardcodeaba y por eso Gmail mostraba el remitente antiguo).
+  - El Subject enviado a SES es exactamente el configurado: se eliminaron los
+    prefijos `[PRUEBA]` y el fallback inventado `[Prueba] HJ Campaigns`.
+  - Formularios con valores globales en modo lectura: la creación de campañas
+    ya no edita asunto (si no hay asunto configurado no se puede continuar) y
+    los dos diálogos de prueba solo dejan editar el destinatario.
+  - En "Configuración de correo" el dominio `@leisureparts4u.store` es fijo y
+    visible: solo se edita la parte local del correo.
+  - `GET /system/mail-config` responde con `Cache-Control: no-store` y las
+    consultas React Query usan `staleTime: 0` + `refetchOnMount: "always"`:
+    guardar se refleja al reabrir cualquier formulario sin reiniciar nada.
+  - Compatibilidad: `POST /campaigns` sigue aceptando `subject`/`from_name`/
+    `from_email` de clientes antiguos, pero solo como último recurso cuando no
+    hay configuración guardada; con config guardada la config global siempre gana.
+
+### Añadido
+
+- **Configuración de correo** (remitente y asunto predeterminados centralizados):
+  - Nuevo apartado independiente en el menú lateral (`/panel/config-correo`),
+    al mismo nivel que Campañas, Listas y Plantillas, con tres campos editables
+    (nombre del remitente, correo del remitente y asunto predeterminado),
+    previsualización de la cabecera `From` y botón **Guardar configuración**.
+  - Backend: `GET/PUT /api/v1/system/mail-config` reutiliza la tabla
+    `app_settings` (sin migraciones). Solo administradores guardan (`403` para
+    el resto); lectura para cualquier usuario autenticado.
+  - Validación en frontend y backend (`app/services/mail_config.py`): el correo
+    del remitente debe pertenecer exclusivamente al dominio verificado
+    `leisureparts4u.store`; se rechazan saltos de línea y caracteres de control
+    (anti inyección de cabeceras RFC 5322); longitudes acotadas. El endpoint
+    genérico `PUT /settings/{key}` comparte las mismas reglas para las claves
+    de correo.
+  - Los envíos de prueba (plantillas y campañas) usan la configuración sin
+    reintroducir datos; el destinatario sigue siendo editable e independiente
+    (ver «Corregido»: la configuración es la única fuente de verdad).
+  - 24 pruebas de regresión (`backend/tests/test_mail_config.py`), incluida la
+    verificación de las cabeceras `From`/`Subject` construidas para el mensaje
+    (decodificadas como las mostraría Gmail).
+
+## [2.0.0] — 2026-10-27
+
+Versión PRO: plataforma de campañas profesional con flujo simplificado,
+métricas correctas y visibilidad de entregabilidad honesta.
+
+### Corregido (crítico)
+
+- **HTML: los `<style>` dejan de destruirse** (`backend/app/services/sanitizer.py`).
+  Causa: `nh3.clean()` trata `<style>` como *clean_content_tags* por defecto y
+  eliminaba la etiqueta **y todo su CSS**. Ahora:
+  1) `nh3` conserva los bloques `<style>` (`clean_content_tags={"script"}`) y el
+     atributo `style`, manteniendo la protección contra JavaScript, atributos de
+     eventos, URLs peligrosas (`javascript:`) y HTML activo;
+  2) **Premailer** convierte el CSS a estilos inline (compatibilidad con Gmail y
+     clientes que ignoran `<style>`) conservando las media queries en el bloque
+     `<style>` para diseño responsive;
+  3) endurecimiento CSS (`expression()`, `-moz-binding`, `@import`, `javascript:`
+     eliminados de estilos inline y bloques).
+  Canalización aplicada en vistas previas (`templates.py`), envío de pruebas,
+  campañas, worker y envíos programados (`renderer.py`).
+
+### Añadido (contactos)
+
+- **Alta simplificada**: el formulario pide exclusivamente el correo electrónico.
+  No se vuelve a pedir consentimiento a contactos ya suscriptos; los estados y
+  bajas existentes se conservan sin inventar autorizaciones.
+  **Protección anti-reactivación (revisión final)**: un correo que esté en la
+  lista de supresión **nunca** pasa a «suscripto» — si no tiene contacto previo
+  se crea como «dado_baja» (aviso `correo_suprimido`); si ya existe como
+  suscripto, la supresión permanece y lo sigue excluyendo de envíos
+  (`can_send_promotional` → `en_supresion`). Reimportar un suscripto no altera
+  su suscripción ni duplica registros. Cubierto por 3 pruebas nuevas.
+- **Importación CSV y TXT**: TXT con un correo por línea; deduplicación
+  automática (en archivo y contra la base), validación de direcciones,
+  codificaciones UTF-8/Latin-1 y asignación opcional a lista.
+- **Selección múltiple + eliminación masiva con confirmación** (eliminar
+  definitivamente o dar de baja + supresión), buscador y contador total.
+
+### Añadido (campañas y envíos)
+
+- **Asistente de creación en 5 pasos**: 1) destinatarios (con total de
+  destinatarios elegibles mostrado antes del envío vía
+  `POST /campaigns/recipients-preview`), 2) asunto, 3) plantilla o HTML pegado,
+  4) enviar ahora o programar (fecha, hora, zona horaria), 5) confirmación.
+  El remitente se toma automáticamente de la configuración
+  (`default_from_name`/`default_from_email`).
+- **Cola de envíos en tiempo real** (`GET /campaigns/queue/active` + página
+  `/panel/cola`): por campaña muestra nombre, total, enviados, pendientes,
+  entregados, fallidos, rebotes, reintentos, % avance, velocidad (mensajes/min),
+  estado, hora de inicio/fin y último error, con barra de progreso y controles
+  pausar/reanudar/cancelar. Los workers respetan pausa/cancelación y la
+  unicidad (campaign_id, contact_id) evita envíos duplicados.
+- **Programaciones**: modificar (`PUT /campaigns/{id}/schedule`), cancelar
+  programación (`POST /campaigns/{id}/schedule/cancel`, vuelve a borrador),
+  próximos e historial (`/campaigns/scheduled/upcoming|history`). Persisten en
+  PostgreSQL, por lo que sobreviven a reinicios del VPS; zona horaria por
+  campaña.
+- **Métricas con denominadores explícitos** (`GET /stats/metrics`, global y por
+  campaña): Success Rate = entregas / resultados definitivos; Bounce Rate =
+  rebotes / aceptados por SES; Open Rate y Click Rate = destinatarios únicos /
+  entregas (varias aperturas del mismo destinatario cuentan una vez); Failed =
+  mensajes no enviados. Cuando una tasa no es calculable se muestra «—», nunca
+  un cero inventado.
+
+### Añadido (panel y monitorización)
+
+- **Dashboard**: tarjetas Total / Sent / Delivered / Pending / Failed / Bounce /
+  Success Rate / Bounce Rate / Open Rate / Click Rate / Complaints + gráfico de
+  evolución diaria.
+- **Página Estadísticas** con filtros por campaña y período (7/14/30/90 días) y
+  explicación de cada denominador.
+- **Página Entregabilidad**: Inbox confirmado y Spam confirmado aparecen como
+  «no disponible» (Amazon SES no reporta la ubicación final; no se inventan
+  cifras ni se confunde Delivered con Inbox), junto con entregado al servidor
+  receptor, rebotado, rechazado, quejas y ubicación desconocida.
+  **Estado: funcionalidad parcialmente implementada.** Lo que sí funciona y
+  está conectado a datos reales de SES/SQS: entregas al servidor receptor,
+  rebotes (hard/soft), rechazos, quejas (la única señal de spam que SES
+  reporta) y ubicación desconocida. **Pendiente (NO declarar como terminado):**
+  la medición real de Inbox vs Spam requiere pruebas con buzones semilla
+  (seedlist) autorizados o un servicio externo de monitorización; mientras no
+  se configure, la página lo muestra como «No disponible» con el motivo.
+- **Monitor SES**: cuota diaria dinámica (consultada a la API, sin valores
+  fijos), envíos de las últimas 24 h, velocidad máxima, reputación
+  (`get_account`: estado de aplicación, envío habilitado) y errores de envío de
+  las últimas 24 h. Cuotas vía `GetAccount` (corrección de producción: ver
+  revisión 3).
+- **Navegación completa** (Panel, Contactos, Listas, Plantillas, Campañas,
+  Programadas, Cola de envíos, Estadísticas, Entregabilidad, Supresión,
+  Ajustes) con modo claro/oscuro, menú móvil con todas las secciones y
+  accesos rápidos inferiores en Android/móvil.
+
+### Técnico
+
+- `premailer>=3.10,<4.0` añadido a `requirements.txt` (sin cambios de esquema de
+  base de datos: no se requieren migraciones Alembic).
+- `docker-compose.yml` verificado de forma estática (YAML + anclas + redes):
+  los 7 servicios (postgres, redis, migrate, api, worker, scheduler, frontend)
+  resuelven en la red interna `hj_internal`. Los puertos usan
+  `${BIND_IP:-127.0.0.1}`: **el acceso real lo define el `.env` del VPS y esta
+  versión no lo cambia** (el procedimiento de `docs/ACTUALIZACION_V2.md` lo
+  comprueba antes y después del despliegue).
+- `frontend/tsconfig.json`: `typeRoots` fijado localmente (evita resolución de
+  tipos desde directorios superiores).
+
+### Pruebas
+
+- Suite backend: **110 pruebas** (80 previas + 24 nuevas en `tests/test_pro_v2.py`
+  + 3 de endurecimiento de seguridad: bloqueo SSRF de IPs internas/metadata, CSS
+  `behavior:url` eliminado + 3 de contactos: suprimido no se activa, suscripto
+  no se altera al reimportar, supresión previa se conserva). Todas en verde
+  con SES/SQS simulados.
+- Frontend: `next build` completo en verde con todas las páginas nuevas.
+
+### Estado de las funciones (v2.0.0)
+
+| Función | Estado |
+|---|---|
+| Contactos solo-email, import CSV/TXT, dedup, borrado masivo, protección anti-reactivación de suprimidos | ✅ Completa (probada) |
+| Asistente de campañas en 5 pasos con conteo previo | ✅ Completa (probada) |
+| CSS `<style>` conservado e inlineado (Premailer) | ✅ Completa (probada) |
+| Cola en tiempo real con pausar/reanudar/cancelar | ✅ Completa (probada) |
+| Programaciones persistentes (reprogramar/cancelar) | ✅ Completa (probada) |
+| Métricas con denominadores (success/bounce/open/click) | ✅ Completa (probada) |
+| Monitor SES (cuota dinámica, reputación, errores 24 h) | ✅ Completa (vía `GetAccount` SESv2) |
+| Eventos SES: delivery, bounce, complaint | ⏳ **Código listo (SQS), medición NO verificada en producción**: requiere crear la cola + destino de eventos y verificar el flujo completo (`docs/Eventos_SES_SQS.md`); sin configurar, los contadores permanecen en 0 |
+| **Medición real de Inbox vs Spam** | ⏳ **Pendiente**: requiere seedlist autorizada o servicio externo; la página muestra «No disponible» honestamente |
+| Aperturas/clics reales (píxeles y enlaces) | ✅ Disponible vía tracking propio (requiere imágenes habilitadas en el cliente) |
+| Despliegue real en VPS | ⏳ Pendiente de autorización (revisar PR #1 y seguir `docs/ACTUALIZACION_V2.md`)
+
+### Corregido en la revisión final (respaldos y restauración)
+
+- `docs/ACTUALIZACION_V2.md`: el respaldo obligatorio es **`pg_dump` con
+  `set -o pipefail`** + verificación de integridad (tamaño no nulo, `gzip -t`,
+  marcador «PostgreSQL database dump complete») + **restauración de prueba no
+  destructiva** en contenedor desechable (demuestra que el dump es restaurable
+  y cuenta registros reales, sin tocar la base de producción).
+- El `tar` en caliente del volumen (inconsistente con PostgreSQL en marcha) se
+  eliminó del procedimiento; la copia física es **opcional** con
+  **`pg_basebackup`** (mecanismo consistente de PostgreSQL) y sus requisitos
+  documentados (`-u postgres` porque `pg_basebackup` rechaza root, espacio en
+  disco, replicación local por socket del contenedor).
+- La restauración de datos ya **no incluye comandos destructivos automáticos**:
+  exige confirmación explícita escrita (`RESTAURAR`), restaura en un **volumen
+  nuevo** apuntado con override temporal y el volumen original queda intacto.
+
+### Corregido en la revisión de producción 3 (healthchecks, SES y eventos)
+
+- **Healthchecks worker/scheduler (unhealthy con FailingStreak 210)**: la
+  imagen ejecutaba `curl 127.0.0.1:8000` en TODOS los contenedores, pero
+  worker y scheduler no exponen HTTP. Nuevo módulo `app/workers/heartbeat.py`:
+  cada ciclo del bucle registra un latido real en Redis; el healthcheck
+  (`python -m app.workers.heartbeat <nombre> --max-age N`) comprueba Redis
+  alcanzable + latido fresco (worker 120 s, scheduler 300 s), no mera
+  existencia del proceso. Scheduler ahora también apaga limpio con SIGTERM.
+  18 pruebas nuevas (128 en verde: 14 de heartbeat + 4 de cuota/envío SES).
+- **Cuota SES vía `GetAccount`**: incorporada la corrección local del VPS —
+  `get_account_sending_capabilities()` no existe en SESv2 y rompía la consulta
+  en producción. Ahora `get_account()` lee `SendQuota.{Max24HourSend,
+  SentLast24Hours, MaxSendRate}` + `SendingEnabled`, con la misma interfaz de
+  salida (sin regresiones en monitor/estadísticas). Mock de pruebas ajustado a
+  la forma real de la respuesta.
+- **Separación de puertos como en producción**: `BIND_IP_API` (127.0.0.1,
+  privada) y `BIND_IP_FRONTEND` (público en el VPS con `0.0.0.0:8085`) —
+  variables explícitas por servicio; `deploy.sh --check` las valida.
+- **Frontend**: `@tailwindcss/postcss` añadido a devDependencies (lo usaba
+  `postcss.config.mjs` sin declararlo; el build Docker fallaría limpio).
+  `next build` en verde.
+- **Permisos IAM documentados** (`docs/SES_PERMISOS.md`): el código usa SESv2
+  `SendEmail` (contenido raw) → acción `ses:SendEmail`, no `ses:SendRawEmail`
+  (v1, que es la denegada). Política mínima + verificación con
+  `simulate-principal-policy`; sin pedir credenciales ni ampliar permisos.
+- **Eventos SES honestidad** (`docs/Eventos_SES_SQS.md`): sin
+  `AWS_SQS_EVENTS_QUEUE_URL` configurada y sin verificación de punta a punta,
+  entregas/rebotes/quejas NO se miden (contadores en 0). Log del worker ahora
+  lo indica con la guía de conexión. La medición queda marcada como
+  **pendiente de verificación**, no funcional.
+
+### Corregido en la revisión de producción 4 (post-despliegue: preview, importación y eliminaciones)
+
+- **Previsualización de plantillas HTML rota (500 NameError)**: `templates.py`
+  llamaba a `inline_email_css()` sin importarla (`renderer.py` la importaba;
+  `templates.py` no). El error solo aparecía al usar el endpoint
+  `POST /templates/preview` con `mode=html`, por eso la suite no lo detectaba.
+  Corregida la importación; el preview vuelve a aplicar el CSS inline.
+- **Importación CSV/TXT con «Field required»**: el frontend llamaba a
+  `api.post(path, formData)`; `api.post` serializa su argumento como JSON
+  (un FormData se convierte en `{}` con `Content-Type: application/json`), de
+  modo que la API nunca recibía el archivo y respondía 422 con el mensaje
+  críptico «Field required» (campo `archivo`). El backend y el nombre de campo
+  `archivo` eran correctos. Corregido con `api.postForm` (que no fija
+  Content-Type y deja que el navegador ponga el boundary), el tipado de
+  `api.post` ahora exige objetos planos (impide repetir el error) y los
+  errores 422 se muestran con el campo afectado («campo 'archivo': …»).
+- **Eliminación de contactos**: añadida la eliminación individual (botón en la
+  fila y en el detalle) reutilizando `POST /contacts/bulk-delete` con
+  confirmación explícita, junto a la masiva existente. Integridad verificada
+  por pruebas: los mensajes de campaña y el historial de consentimiento se
+  borran en cascada, la campaña no se rompe, las **supresiones del correo se
+  conservan** (un correo suprimido nunca vuelve a «suscripto» tras
+  reimportarse) y la **auditoría** registra la acción. El contador de la tabla
+  se actualiza automáticamente.
+- **Eliminación de plantillas mejorada**: confirmación con `AlertDialog` en
+  lugar de `confirm()` nativo; las plantillas del sistema siguen protegidas
+  (400); al eliminar una plantilla usada por campañas, la API responde con el
+  número de campañas asociadas y la interfaz lo informa — no se rompe nada
+  porque el contenido de la campaña se congela al crearse y la FK es
+  `ON DELETE SET NULL` (verificado con pruebas).
+- Sin cambios de esquema de base de datos (no se requieren migraciones).
+- **Suite backend: 142 pruebas** en verde (128 previas + 14 nuevas de
+  regresión en `tests/test_fixes_produccion.py`). `next build` en verde.
+
 ## [1.0.1] — 2026-10-27
 
 Correcciones previas al despliegue en el VPS (reportadas tras clonar `ee845ee`).

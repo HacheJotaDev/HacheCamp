@@ -57,11 +57,21 @@ async function request<T>(
     let detail = `Error ${res.status}`;
     try {
       const data = await res.json();
-      detail = typeof data.detail === "string"
-        ? data.detail
-        : Array.isArray(data.detail)
-          ? data.detail.map((d: { msg?: string }) => d.msg).join("; ")
-          : JSON.stringify(data.detail ?? data);
+      if (typeof data.detail === "string") {
+        detail = data.detail;
+      } else if (Array.isArray(data.detail)) {
+        // Errores de validación FastAPI (422): incluye el campo afectado
+        // para que el mensaje sea comprensible (p. ej. "campo 'archivo': Field required").
+        detail = data.detail
+          .map((d: { loc?: unknown[]; msg?: string }) => {
+            const loc = Array.isArray(d.loc) ? d.loc.filter((p) => p !== "body") : [];
+            const campo = loc.length ? `campo '${loc.join(".")}'` : "";
+            return campo ? `${campo}: ${d.msg ?? "error"}` : (d.msg ?? "error");
+          })
+          .join("; ");
+      } else {
+        detail = JSON.stringify(data.detail ?? data);
+      }
     } catch {
       /* respuesta sin JSON */
     }
@@ -75,11 +85,14 @@ async function request<T>(
 
 export const api = {
   get: <T,>(path: string) => request<T>("GET", path),
-  post: <T,>(path: string, json?: unknown) => request<T>("POST", path, { json }),
+  // `json` exige un objeto plano: evita pasar por error un FormData
+  // (que se serializaría como "{}" y provocaría "Field required" en la API).
+  // Para archivos usa api.postForm(path, formData).
+  post: <T,>(path: string, json?: Record<string, unknown>) => request<T>("POST", path, { json }),
   postForm: <T,>(path: string, formData: FormData) =>
     request<T>("POST", path, { formData }),
-  put: <T,>(path: string, json?: unknown) => request<T>("PUT", path, { json }),
-  patch: <T,>(path: string, json?: unknown) => request<T>("PATCH", path, { json }),
+  put: <T,>(path: string, json?: Record<string, unknown>) => request<T>("PUT", path, { json }),
+  patch: <T,>(path: string, json?: Record<string, unknown>) => request<T>("PATCH", path, { json }),
   delete: <T,>(path: string) => request<T>("DELETE", path),
 };
 
@@ -174,6 +187,17 @@ export interface EditorBlock {
   props: Record<string, any>;
 }
 
+export interface TemplateVersion {
+  id: string;
+  template_id: string;
+  version: number;
+  mode: "bloques" | "html";
+  blocks: EditorBlock[] | null;
+  html: string | null;
+  created_by: string | null;
+  created_at: string;
+}
+
 export interface Campaign {
   id: string;
   name: string;
@@ -202,6 +226,8 @@ export interface Campaign {
   scheduled_at: string | null;
   timezone: string;
   approved_at: string | null;
+  enqueued_at: string | null;
+  completed_at: string | null;
   created_at: string;
   updated_at: string;
   progreso?: {
@@ -232,8 +258,36 @@ export interface Paged<T> {
   por_estado?: Record<string, number>;
 }
 
+/** Configuración de correo (remitente y asunto predeterminados). */
+export interface MailConfig {
+  from_name: string;
+  from_email: string;
+  subject: string;
+  dominio: string;
+  guardado: {
+    default_from_name: string | null;
+    default_from_email: string | null;
+    default_subject: string | null;
+  };
+}
+
 export interface DashboardData {
   resumen: Record<string, number>;
+  metricas?: {
+    total: number;
+    aceptados_ses: number;
+    entregados: number;
+    pendientes: number;
+    fallidos: number;
+    rebotes: number;
+    rebotes_temporales: number;
+    quejas: number;
+    success_rate: number | null;
+    bounce_rate: number | null;
+    open_rate: number | null;
+    click_rate: number | null;
+    denominadores?: Record<string, string>;
+  };
   cuota_ses: {
     max_24h?: number;
     sent_last_24h?: number;

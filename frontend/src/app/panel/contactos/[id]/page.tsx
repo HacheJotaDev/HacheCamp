@@ -2,9 +2,10 @@
 
 import { use } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { ArrowLeft, Trash2, Loader2 } from "lucide-react";
+import { ArrowLeft, Trash2, Loader2, ListX } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -19,6 +20,7 @@ import { ConsentEventOut } from "@/lib/api";
 export default function ContactoDetallePage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const qc = useQueryClient();
+  const router = useRouter();
 
   const { data: contacto, isLoading } = useQuery({
     queryKey: ["contacto", id],
@@ -36,6 +38,21 @@ export default function ContactoDetallePage({ params }: { params: Promise<{ id: 
       toast.success("Contacto dado de baja y suprimido globalmente");
       qc.invalidateQueries({ queryKey: ["contacto", id] });
       qc.invalidateQueries({ queryKey: ["contactos"] });
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  // Eliminación definitiva individual (borra registro + historial de envíos;
+  // las supresiones y la auditoría se conservan). Requiere confirmación.
+  const eliminarDefinitivo = useMutation({
+    mutationFn: () =>
+      api.post<{ procesados: number }>("/api/v1/contacts/bulk-delete", {
+        ids: [id], modo: "eliminar", confirmar: true,
+      }),
+    onSuccess: (res) => {
+      toast.success(`Contacto eliminado (${res.procesados})`);
+      qc.invalidateQueries({ queryKey: ["contactos"] });
+      router.push("/panel/contactos");
     },
     onError: (e: Error) => toast.error(e.message),
   });
@@ -66,7 +83,9 @@ export default function ContactoDetallePage({ params }: { params: Promise<{ id: 
           {contacto.status === "suscripto" && (
             <AlertDialog>
               <AlertDialogTrigger asChild>
-                <Button variant="destructive" size="sm"><Trash2 className="mr-2 h-4 w-4" /> Dar de baja</Button>
+                <Button variant="outline" size="sm" className="border-amber-500/50 text-amber-600">
+                  <ListX className="mr-2 h-4 w-4" /> Dar de baja
+                </Button>
               </AlertDialogTrigger>
               <AlertDialogContent>
                 <AlertDialogHeader>
@@ -78,13 +97,40 @@ export default function ContactoDetallePage({ params }: { params: Promise<{ id: 
                 </AlertDialogHeader>
                 <AlertDialogFooter>
                   <AlertDialogCancel>Cancelar</AlertDialogCancel>
-                  <AlertDialogAction className="bg-red-600 hover:bg-red-700" onClick={() => darBaja.mutate()}>
+                  <AlertDialogAction className="bg-amber-600 hover:bg-amber-700" onClick={() => darBaja.mutate()}>
                     Confirmar baja
                   </AlertDialogAction>
                 </AlertDialogFooter>
               </AlertDialogContent>
             </AlertDialog>
           )}
+          <AlertDialog>
+            <AlertDialogTrigger asChild>
+              <Button variant="destructive" size="sm">
+                <Trash2 className="mr-2 h-4 w-4" /> Eliminar definitivamente
+              </Button>
+            </AlertDialogTrigger>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>¿Eliminar definitivamente este contacto?</AlertDialogTitle>
+                <AlertDialogDescription>
+                  Se borra el registro y su historial de envíos y consentimiento. Las supresiones
+                  del correo y la auditoría se conservan. Esta acción no se puede deshacer.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>No, cancelar</AlertDialogCancel>
+                <AlertDialogAction
+                  className="bg-red-600 hover:bg-red-700"
+                  disabled={eliminarDefinitivo.isPending}
+                  onClick={(e) => { e.preventDefault(); eliminarDefinitivo.mutate(); }}
+                >
+                  {eliminarDefinitivo.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                  Eliminar definitivamente
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
         </div>
       </div>
 

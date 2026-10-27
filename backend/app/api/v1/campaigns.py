@@ -3,7 +3,7 @@ cancelación, progreso en tiempo real e historial."""
 from __future__ import annotations
 
 import zoneinfo
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -15,6 +15,7 @@ from app.core.audit import audit
 from app.core.db import get_db, utcnow
 from app.core.deps import get_current_user, require_admin
 from app.models import Campaign, CampaignMessage, SesEvent, Template, User
+from app.services import contacts as contact_service
 from app.schemas import (
     CampaignAction,
     CampaignCreate,
@@ -24,10 +25,17 @@ from app.schemas import (
     CampaignOut,
     CampaignUpdate,
     RecipientsEstimate,
+    RecipientsPreview,
 )
 from app.services import campaigns as campaign_service
+from app.services import mail_config
 from app.services import ses as ses_service
-from app.services.renderer import html_to_plain_text, render_template_string, validate_template_source
+from app.services.renderer import (
+    html_to_plain_text,
+    render_campaign_email,
+    render_template_string,
+    validate_template_source,
+)
 from app.services.sanitizer import SanitizationError, sanitize_editor_blocks, sanitize_email_html
 
 router = APIRouter(prefix="/campaigns", tags=["Campañas"])
@@ -68,6 +76,154 @@ def list_campaigns(db: Session = Depends(get_db), user: User = Depends(get_curre
     }
 
 
+# Rutas estáticas (deben declararse antes que /{campaign_id} para que
+# FastAPI no interprete "queue", "scheduled" o "recipients" como un id).
+
+
+@router.post("/recipients-preview", response_model=RecipientsEstimate)
+def recipients_preview(payload: RecipientsPreview, db: Session = Depends(get_db),
+                       user: User = Depends(get_current_user)):
+    """Cuenta los destinatarios elegibles ANTES de crear la campaña.
+
+    Aplica las mismas reglas que el envío real: estado suscripto, sin
+    supresión (campañas promocionales) y pertenencia a lista/segmento.
+    """
+    if not payload.list_id and not payload.segment_id:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            "Debe seleccionar una lista o un segmento")
+    probe = Campaign(
+        name="preview", subject="preview", from_name="preview", from_email="preview@local",
+        category=payload.category, list_id=payload.list_id, segment_id=payload.segment_id,
+    )
+    recipients = campaign_service.select_recipients(db, probe)
+    return RecipientsEstimate(destinatarios=len(recipients))
+
+
+@router.get("/queue/active", response_model=dict)
+def queue_active(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Estado en tiempo real de la cola de envíos, por campaña.
+
+    Incluye progreso, velocidad reciente (mensajes/min) y último error.
+    """
+    from app.core.db import utcnow as _utcnow
+
+    activos = (
+        db.query(Campaign)
+        .filter(Campaign.status.in_(["en_cola", "enviando", "pausada"]))
+        .order_by(Campaign.enqueued_at.asc().nullslast())
+        .all()
+    )
+    ahora = _utcnow()
+    items = []
+    for c in activos:
+        progreso = campaign_service.campaign_progress(db, c)
+        estados = progreso["por_estado"]
+        # Velocidad: mensajes aceptados en los últimos 60 segundos
+        minuto = (
+            db.query(func.count(CampaignMessage.id))
+            .filter(
+                CampaignMessage.campaign_id == c.id,
+                CampaignMessage.sent_at.isnot(None),
+                CampaignMessage.sent_at >= ahora - timedelta(seconds=60),
+            )
+            .scalar() or 0
+        )
+        reintentos = (
+            db.query(func.count(CampaignMessage.id))
+            .filter(CampaignMessage.campaign_id == c.id, CampaignMessage.attempts > 1)
+            .scalar() or 0
+        )
+        ultimo_error = (
+            db.query(CampaignMessage)
+            .filter(
+                CampaignMessage.campaign_id == c.id,
+                CampaignMessage.last_error.isnot(None),
+                CampaignMessage.status.in_(["error", "incierto", "rebote_temporal"]),
+            )
+            .order_by(CampaignMessage.updated_at.desc())
+            .first()
+        )
+        items.append({
+            "id": c.id,
+            "name": c.name,
+            "subject": c.subject,
+            "status": c.status,
+            "total": progreso["total"],
+            "procesados": progreso["procesados"],
+            "por_estado": estados,
+            "enviados": estados.get("aceptado", 0) + estados.get("entregado", 0),
+            "pendientes": progreso["pendientes"],
+            "entregados": estados.get("entregado", 0),
+            "fallidos": estados.get("error", 0),
+            "rebotes": estados.get("rebote_permanente", 0) + estados.get("rebote_temporal", 0),
+            "reintentos": reintentos,
+            "velocidad_por_minuto": minuto,
+            "hora_inicio": c.enqueued_at.isoformat() if c.enqueued_at else None,
+            "hora_fin": c.completed_at.isoformat() if c.completed_at else None,
+            "ultimo_error": (ultimo_error.last_error[:200] if ultimo_error and ultimo_error.last_error else None),
+        })
+    return {"items": items, "actualizado": ahora.isoformat()}
+
+
+@router.get("/scheduled/upcoming", response_model=dict)
+def scheduled_upcoming(db: Session = Depends(get_db), user: User = Depends(get_current_user),
+                       page: int = Query(1, ge=1), per_page: int = Query(20, ge=1, le=100)):
+    """Próximos envíos programados (persisten tras reinicios del VPS)."""
+    query = (
+        db.query(Campaign)
+        .filter(Campaign.status == "programada", Campaign.scheduled_at.isnot(None))
+        .order_by(Campaign.scheduled_at.asc())
+    )
+    total = query.count()
+    items = query.offset((page - 1) * per_page).limit(per_page).all()
+    return {
+        "total": total, "page": page, "per_page": per_page,
+        "items": [CampaignOut.model_validate(c).model_dump(mode="json") for c in items],
+    }
+
+
+@router.get("/scheduled/history", response_model=dict)
+def scheduled_history(db: Session = Depends(get_db), user: User = Depends(get_current_user),
+                      page: int = Query(1, ge=1), per_page: int = Query(20, ge=1, le=100)):
+    """Historial de envíos que estuvieron programados (completadas, canceladas,
+    fallidas, o ya en cola/enviando)."""
+    query = (
+        db.query(Campaign)
+        .filter(Campaign.scheduled_at.isnot(None),
+                Campaign.status.in_(["completada", "cancelada", "fallida", "en_cola", "enviando", "pausada"]))
+        .order_by(Campaign.scheduled_at.desc())
+    )
+    total = query.count()
+    items = query.offset((page - 1) * per_page).limit(per_page).all()
+    return {
+        "total": total, "page": page, "per_page": per_page,
+        "items": [CampaignOut.model_validate(c).model_dump(mode="json") for c in items],
+    }
+
+
+def _resolver_remitente(db: Session, payload: CampaignCreate) -> tuple[str, str]:
+    """Remitente de la campaña: SIEMPRE "Configuración de correo" si existe.
+
+    Prioridad: valores guardados (app_settings: default_from_name /
+    default_from_email) > valores del payload (solo por compatibilidad con
+    clientes antiguos; el panel ya no los envía) > constantes del proyecto.
+    El correo del remitente debe pertenecer al dominio verificado en SES.
+    """
+    guardado = mail_config.leer_guardado(db)
+    from_name = guardado[mail_config.KEY_FROM_NAME] or \
+        (payload.from_name or "").strip() or mail_config.DEFAULT_FROM_NAME
+    from_email = guardado[mail_config.KEY_FROM_EMAIL] or \
+        (payload.from_email or "").strip() or mail_config.DEFAULT_FROM_EMAIL
+    if not contact_service.is_valid_email(from_email):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            f"El remitente por defecto no es un correo válido: {from_email}")
+    try:
+        from_email = mail_config.validar_from_email(from_email)
+    except mail_config.MailConfigError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc))
+    return from_name, from_email
+
+
 @router.post("", response_model=CampaignDetailOut, status_code=201)
 def create_campaign(payload: CampaignCreate, request: Request,
                     db: Session = Depends(get_db), user: User = Depends(get_current_user)):
@@ -75,6 +231,19 @@ def create_campaign(payload: CampaignCreate, request: Request,
     if payload.list_id is None and payload.segment_id is None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST,
                             "Debe seleccionar una lista o un segmento de destinatarios")
+
+    from_name, from_email = _resolver_remitente(db, payload)
+
+    # Asunto: SIEMPRE el predeterminado de "Configuración de correo" si existe
+    # (fuente única); el payload solo se acepta como compatibilidad con
+    # clientes antiguos cuando aún no hay asunto configurado.
+    subject = mail_config.config_efectiva(db)["subject"]
+    if not subject:
+        subject = (payload.subject or "").strip()
+    if not subject:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            "El asunto es obligatorio: define un asunto "
+                            "predeterminado en 'Configuración de correo'")
 
     blocks = None
     html = None
@@ -89,8 +258,8 @@ def create_campaign(payload: CampaignCreate, request: Request,
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc))
 
     campaign = Campaign(
-        name=payload.name, subject=payload.subject,
-        from_name=payload.from_name, from_email=payload.from_email,
+        name=payload.name, subject=subject,
+        from_name=from_name, from_email=from_email,
         reply_to=payload.reply_to, template_id=payload.template_id,
         mode=payload.mode, blocks=blocks, html=html, plain_text=plain_text,
         category=payload.category, list_id=payload.list_id, segment_id=payload.segment_id,
@@ -116,6 +285,8 @@ def get_campaign(campaign_id: str, db: Session = Depends(get_db),
     campaign = _get_campaign(db, campaign_id)
     detail = CampaignDetailOut.model_validate(campaign)
     detail.progreso = campaign_service.campaign_progress(db, campaign)
+    from app.services.stats import metrics_summary
+    detail.metricas = metrics_summary(db, campaign_id=campaign.id)
     return detail
 
 
@@ -243,6 +414,60 @@ def schedule_campaign(campaign_id: str, payload: CampaignAction, request: Reques
     campaign.timezone = tz_name
     campaign_service.transition(campaign, "programada", user_id=user.id, user_email=user.email,
                                 detail={"programada_para": payload.scheduled_at.isoformat()})
+    db.commit()
+    return {"estado": campaign.status}
+
+
+@router.put("/{campaign_id}/schedule")
+def reschedule_campaign(campaign_id: str, payload: CampaignAction, request: Request,
+                        db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Modifica la programación de una campaña ya programada (fecha, hora o
+    zona horaria). Los mensajes pendientes aún no se han encolado."""
+    campaign = _get_campaign(db, campaign_id)
+    if campaign.status != "programada":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            "Solo se puede reprogramar una campaña en estado programada")
+    if payload.scheduled_at is not None:
+        tz_name = payload.timezone or campaign.timezone or "UTC"
+        try:
+            zoneinfo.ZoneInfo(tz_name)
+        except Exception:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, f"Zona horaria inválida: {tz_name}")
+        campaign.scheduled_at = payload.scheduled_at
+        campaign.timezone = tz_name
+    elif payload.timezone is not None:
+        try:
+            zoneinfo.ZoneInfo(payload.timezone)
+        except Exception:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                                f"Zona horaria inválida: {payload.timezone}")
+        campaign.timezone = payload.timezone
+    campaign_service.add_history(campaign, "reprogramada", user_id=user.id,
+                                 user_email=user.email,
+                                 detail={"nueva_fecha": (
+                                     campaign.scheduled_at.isoformat() if campaign.scheduled_at else None)})
+    audit(db, "campana_reprogramada", user_id=user.id, user_email=user.email,
+          entity_type="campaign", entity_id=campaign.id, ip=security.client_ip(request))
+    db.commit()
+    return {"estado": campaign.status, "scheduled_at": (
+        campaign.scheduled_at.isoformat() if campaign.scheduled_at else None),
+        "timezone": campaign.timezone}
+
+
+@router.post("/{campaign_id}/schedule/cancel")
+def cancel_schedule(campaign_id: str, request: Request, db: Session = Depends(get_db),
+                    user: User = Depends(get_current_user)):
+    """Cancela la programación y devuelve la campaña a borrador (sin cancelar
+    la campaña en sí)."""
+    campaign = _get_campaign(db, campaign_id)
+    if campaign.status != "programada":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            "Solo se puede cancelar la programación de campañas programadas")
+    campaign_service.transition(campaign, "borrador", user_id=user.id, user_email=user.email,
+                                detail={"motivo": "programacion_cancelada"})
+    campaign.scheduled_at = None
+    audit(db, "campana_desprogramada", user_id=user.id, user_email=user.email,
+          entity_type="campaign", entity_id=campaign.id, ip=security.client_ip(request))
     db.commit()
     return {"estado": campaign.status}
 
@@ -379,28 +604,39 @@ def campaign_plain_text(campaign_id: str, db: Session = Depends(get_db),
 @router.post("/{campaign_id}/test-send")
 def campaign_test_send(campaign_id: str, payload: Dict[str, Any], request: Request,
                        db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    """Envío de prueba de la campaña a una dirección autorizada."""
+    """Envío de prueba de la campaña a una dirección autorizada.
+
+    Remitente y asunto SIEMPRE de "Configuración de correo" (valores globales
+    vigentes), aunque la campaña tenga otros almacenados; el destinatario es
+    independiente y editable. Sin prefijos: el Subject enviado a SES es
+    exactamente el asunto configurado.
+    """
     campaign = _get_campaign(db, campaign_id)
     to_email = str(payload.get("to_email", "")).strip()
     if not to_email or "@" not in to_email:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Correo de destino inválido")
     to_email = to_email.lower()
 
+    cfg = mail_config.valores_para_envio(db, subject_fallback=campaign.subject)
+    if not cfg["subject"]:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                            "Define el asunto predeterminado en 'Configuración de correo'")
+
     context = {
         "contact": {"email": to_email, "first_name": "Prueba", "last_name": "",
                     "attributes": {}},
-        "campaign": {"name": campaign.name, "subject": campaign.subject},
+        "campaign": {"name": campaign.name, "subject": cfg["subject"]},
         "unsubscribe_url": "https://ejemplo.local/baja?token=PRUEBA",
         "web_view_url": "",
     }
     try:
         subject, html_final, plain = render_campaign_email(
             mode=campaign.mode, blocks=campaign.blocks, html_source=campaign.html,
-            subject=campaign.subject, context=context,
+            subject=cfg["subject"], context=context,
         )
         ses_id = ses_service.send_test_email(
-            to_email=to_email, subject=f"[PRUEBA] {subject}", html=html_final, text=plain,
-            from_email=campaign.from_email, from_name=campaign.from_name,
+            to_email=to_email, subject=subject, html=html_final, text=plain,
+            from_email=cfg["from_email"], from_name=cfg["from_name"],
             reply_to=campaign.reply_to,
         )
     except ses_service.SESNotConfigured as exc:

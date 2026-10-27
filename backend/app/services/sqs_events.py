@@ -11,7 +11,8 @@ Diseño solicitado para uso personal/privado sin endpoint HTTP público:
 - Idempotencia: cada notificación SNS se registra por MessageId, igual que
   en el webhook HTTP; los eventos SES usan sus propios uids.
 - Mensajes venenosos: tras SQS_MAX_RECEIVE_COUNT lecturas se descartan con
-  registro (además de la DLQ opcional creada por scripts/setup_ses_events.py).
+  registro (además de la DLQ opcional creada siguiendo
+  docs/Eventos_SES_SQS.md).
 - Nunca se registran en el log cuerpos completos (contienen correos).
 """
 from __future__ import annotations
@@ -255,7 +256,11 @@ def start_consumer() -> Optional[threading.Thread]:
     """Arranca el consumidor SQS en un hilo daemon si está configurado."""
     global _stop_event
     if not sqs_enabled():
-        logger.info("Eventos SES por SQS deshabilitados (AWS_SQS_EVENTS_QUEUE_URL vacía)")
+        logger.info(
+            "Eventos SES por SQS deshabilitados (AWS_SQS_EVENTS_QUEUE_URL vacía): "
+            "entregas/rebotes/quejas NO se miden. Conexión y verificación: "
+            "docs/Eventos_SES_SQS.md"
+        )
         return None
     _stop_event = threading.Event()
     hilo = threading.Thread(target=_bucle_consumidor, args=(_stop_event,),

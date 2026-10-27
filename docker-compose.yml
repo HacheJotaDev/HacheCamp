@@ -1,8 +1,15 @@
 # HJ Campaigns — Docker Compose de producción
 # Proyecto independiente: no comparte redes, volúmenes ni puertos con otros proyectos.
 #
-# Puerto público configurable por PORT_FRONTEND (por defecto 127.0.0.1:8085).
+# Separación de acceso (igual que en producción):
+#   API       -> ${BIND_IP_API:-127.0.0.1}:${PORT_API:-8086}        (privada)
+#   Frontend  -> ${BIND_IP_FRONTEND:-127.0.0.1}:${PORT_FRONTEND:-8085} (público si
+#                el .env define BIND_IP_FRONTEND=0.0.0.0)
 # PostgreSQL y Redis NO exponen puertos: solo red interna hj_campaigns_internal.
+#
+# Healthchecks: api usa HTTP (uvicorn); worker y scheduler son procesos de
+# segundo plano SIN servidor HTTP — usan heartbeat en Redis (actividad real,
+# ver app/workers/heartbeat.py), no una comprobación de proceso.
 #
 # Credenciales de AWS (SES/SQS): los servicios api, worker y scheduler reciben
 # los archivos ~/.aws del VPS como secretos Docker (solo lectura, ver
@@ -114,9 +121,17 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+    # Healthcheck explícito (el del Dockerfile también vale, pero se declara
+    # aquí para que la dependencia service_healthy del frontend sea evidente).
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/v1/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
     ports:
-      # Solo local por defecto: publicar vía proxy inverso con HTTPS cuando proceda
-      - "${BIND_IP:-127.0.0.1}:${PORT_API:-8086}:8000"
+      # SOLO local por defecto: pública la del frontend, no esta.
+      - "${BIND_IP_API:-127.0.0.1}:${PORT_API:-8086}:8000"
     deploy:
       resources:
         limits:
@@ -133,6 +148,16 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+    # worker y scheduler NO exponen HTTP: sobreescribir el HEALTHCHECK de la
+    # imagen (curl al 8000, que aquí fallaría siempre -> unhealthy) por una
+    # comprobación de ACTIVIDAD REAL: latido en Redis de su bucle de trabajo.
+    # Umbral 120 s: el peor caso normal del worker (campaña pausada) es ~30 s.
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.workers.heartbeat", "worker", "--max-age", "120"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 30s
     deploy:
       resources:
         limits:
@@ -149,6 +174,14 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+    # Igual que worker: heartbeat real. Umbral 300 s: el ciclo es de 20 s pero
+    # el refresco de cuota SES puede bloquear ~1-2 min (conecta+lee+reintentos).
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.workers.heartbeat", "scheduler", "--max-age", "300"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 30s
     deploy:
       resources:
         limits:
@@ -163,8 +196,8 @@ services:
     environment:
       API_INTERNAL_URL: http://api:8000
     ports:
-      # Dirección pública configurable (por defecto solo localhost:8085)
-      - "${BIND_IP:-127.0.0.1}:${PORT_FRONTEND:-8085}:3000"
+      # Dirección pública configurable: en producción BIND_IP_FRONTEND=0.0.0.0
+      - "${BIND_IP_FRONTEND:-127.0.0.1}:${PORT_FRONTEND:-8085}:3000"
     depends_on:
       api:
         condition: service_healthy

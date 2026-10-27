@@ -22,7 +22,7 @@ import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
   AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
-import { api, Campaign, CampaignMessage, Paged } from "@/lib/api";
+import { api, Campaign, CampaignMessage, MailConfig, Paged } from "@/lib/api";
 import { EmptyState, StatusBadge, fecha, numero } from "@/components/shared";
 import { useAuth } from "@/lib/providers";
 
@@ -44,8 +44,16 @@ export default function CampanaDetallePage({ params }: { params: Promise<{ id: s
     refetchInterval: (q) => (["en_cola", "enviando"].includes(q.state.data?.status ?? "") ? 4000 : 15000),
   });
 
+  // Única fuente de verdad de remitente/asunto: Configuración de correo.
+  // Recarga siempre al abrir (sin caché obsoleta tras guardar cambios).
+  const { data: correoConfig } = useQuery({
+    queryKey: ["mail-config"],
+    queryFn: () => api.get<MailConfig>("/api/v1/system/mail-config"),
+    staleTime: 0, refetchOnMount: "always",
+  });
+
   const accion = useMutation({
-    mutationFn: ({ path, body }: { path: string; body?: unknown }) =>
+    mutationFn: ({ path, body }: { path: string; body?: Record<string, unknown> }) =>
       api.post<{ estado?: string; [k: string]: unknown }>(`/api/v1/campaigns/${id}/${path}`, body ?? {}),
     onSuccess: (res) => {
       toast.success("Acción realizada" + (res.estado ? `: ${res.estado.replace("_", " ")}` : ""));
@@ -219,7 +227,9 @@ export default function CampanaDetallePage({ params }: { params: Promise<{ id: s
             <Card>
               <CardHeader><CardTitle>Configuración</CardTitle></CardHeader>
               <CardContent className="text-sm space-y-2">
-                <Fila k="Remitente" v={`${c.from_name} <${c.from_email}>`} />
+                <Fila k="Remitente (se aplica al enviar)"
+                  v={correoConfig ? `${correoConfig.from_name} <${correoConfig.from_email}>` : "—"} />
+                <Fila k="Asunto (se aplica al enviar)" v={correoConfig?.subject || "—"} />
                 <Fila k="Responder a" v={c.reply_to || "—"} />
                 <Fila k="Categoría" v={c.category} />
                 <Fila k="Zona horaria" v={c.timezone} />
@@ -309,6 +319,22 @@ export default function CampanaDetallePage({ params }: { params: Promise<{ id: s
             <Label>Correo destinatario</Label>
             <Input type="email" value={correoPrueba} onChange={(e) => setCorreoPrueba(e.target.value)}
               placeholder="tu@correo.com" />
+            <p className="text-xs text-muted-foreground">El destinatario es independiente y editable.</p>
+          </div>
+          {/* Remitente y asunto: únicos y globales, siempre en modo lectura */}
+          <div className="rounded-lg border bg-muted/30 p-3 text-sm space-y-1">
+            <p>
+              <span className="text-muted-foreground">De:</span>{" "}
+              <b>{correoConfig?.from_name ?? "…"}</b>{" "}
+              <span className="text-muted-foreground">&lt;{correoConfig?.from_email ?? "…"}&gt;</span>
+            </p>
+            <p>
+              <span className="text-muted-foreground">Asunto:</span> {correoConfig?.subject || "—"}
+            </p>
+            <p className="text-xs text-muted-foreground">
+              Valores globales de <Link href="/panel/config-correo" className="text-emerald-600 hover:underline">Configuración de correo</Link>;
+              se aplican en el momento del envío.
+            </p>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setDialogoPrueba(false)}>Cancelar</Button>

@@ -6,7 +6,7 @@ import {
 } from "recharts";
 import {
   Mail, Send, CheckCircle2, AlertTriangle, UserX, Eye, MousePointerClick,
-  Users, Activity, Gauge, Loader2,
+  Users, Activity, Gauge, Loader2, Target, Clock, XCircle, TrendingUp,
 } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -44,6 +44,29 @@ function StatCard({
   );
 }
 
+function TasaCard({ titulo, tasa, detalle, icon: Icon, tono }: {
+  titulo: string; tasa: number | null | undefined; detalle: string;
+  icon: React.ComponentType<{ className?: string }>; tono: string;
+}) {
+  const texto = tasa === null || tasa === undefined ? "—" : `${tasa.toFixed(1)}%`;
+  return (
+    <Card>
+      <CardContent className="p-4">
+        <div className="flex items-start justify-between gap-2">
+          <div className="min-w-0">
+            <p className="text-xs font-medium text-muted-foreground truncate">{titulo}</p>
+            <p className="text-2xl font-bold mt-1 tabular-nums">{texto}</p>
+            <p className="text-[11px] text-muted-foreground mt-0.5 truncate" title={detalle}>{detalle}</p>
+          </div>
+          <div className="h-9 w-9 rounded-lg bg-muted flex items-center justify-center shrink-0">
+            <Icon className={`h-4.5 w-4.5 ${tono}`} />
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 export default function PanelPage() {
   const { data, isLoading, isError } = useQuery({
     queryKey: ["dashboard"],
@@ -63,9 +86,11 @@ export default function PanelPage() {
   });
 
   const r = data?.resumen;
+  const m = data?.metricas;
   const cuota = data?.cuota_ses;
   const cuotaPct = cuota?.max_24h ? Math.min(100, ((cuota.sent_last_24h || 0) / cuota.max_24h) * 100) : 0;
-  const vacio = r && r.campanas_total === 0 && (r.contactos?.total ?? 0) === 0;
+  const contactosTotal = (r as unknown as { contactos?: { total?: number } } | undefined)?.contactos?.total ?? 0;
+  const vacio = r && r.campanas_total === 0 && contactosTotal === 0;
 
   return (
     <div className="space-y-6">
@@ -104,25 +129,39 @@ export default function PanelPage() {
         </Card>
       ) : (
         <>
+          <div className="grid gap-3 grid-cols-2 lg:grid-cols-4">
+            <TasaCard titulo="Success Rate" tasa={m?.success_rate} icon={Target}
+              tono="text-emerald-600" detalle="Entregas confirmadas / resultados definitivos" />
+            <TasaCard titulo="Bounce Rate" tasa={m?.bounce_rate} icon={AlertTriangle}
+              tono="text-amber-600" detalle="Rebotes / aceptados por SES" />
+            <TasaCard titulo="Open Rate" tasa={m?.open_rate} icon={Eye}
+              tono="text-violet-600" detalle="Aperturas únicas / entregas" />
+            <TasaCard titulo="Click Rate" tasa={m?.click_rate} icon={MousePointerClick}
+              tono="text-teal-600" detalle="Clics únicos / entregas" />
+          </div>
+
           <div className="grid gap-4 grid-cols-2 lg:grid-cols-4">
-            <StatCard titulo="Campañas totales" valor={numero(r.campanas_total)} icon={Mail}
-              detalle={`${r.campanas_activas} activas`} />
-            <StatCard titulo="Aceptados por SES" valor={numero(r.aceptados_ses)} icon={Send}
-              detalle="Solicitud recibida por SES" tono="text-sky-600" />
-            <StatCard titulo="Entregas confirmadas" valor={numero(r.entregas)} icon={CheckCircle2}
-              detalle="Notificadas por SES" />
-            <StatCard titulo="Rebotes" valor={numero(r.rebotes + (r.rebotes_temporales || 0))} icon={AlertTriangle}
-              detalle={`${r.rebotes} permanentes · ${r.rebotes_temporales || 0} temporales`} tono="text-amber-600" />
-            <StatCard titulo="Quejas de spam" valor={numero(r.quejas)} icon={UserX} tono="text-red-600" />
-            <StatCard titulo="Bajas" valor={numero(r.bajas)} icon={UserX} tono="text-orange-600" />
-            <StatCard titulo="Aperturas*" valor={numero(r.aperturas)} icon={Eye} tono="text-violet-600" />
-            <StatCard titulo="Clics" valor={numero(r.clics)} icon={MousePointerClick} tono="text-teal-600" />
+            <StatCard titulo="Total destinatarios" valor={numero(m?.total ?? 0)} icon={Users}
+              detalle="Mensajes de campaña totales" />
+            <StatCard titulo="Sent (aceptados SES)" valor={numero(m?.aceptados_ses ?? 0)} icon={Send}
+              detalle="Aceptados para envío" tono="text-sky-600" />
+            <StatCard titulo="Delivered" valor={numero(m?.entregados ?? 0)} icon={CheckCircle2}
+              detalle="Entregas confirmadas" />
+            <StatCard titulo="Pending" valor={numero(m?.pendientes ?? 0)} icon={Clock}
+              detalle="Pendientes y en proceso" tono="text-muted-foreground" />
+            <StatCard titulo="Failed" valor={numero(m?.fallidos ?? 0)} icon={XCircle}
+              detalle="No se pudieron enviar" tono="text-red-600" />
+            <StatCard titulo="Bounce" valor={numero((m?.rebotes ?? 0) + (m?.rebotes_temporales ?? 0))} icon={AlertTriangle}
+              detalle={`${m?.rebotes ?? 0} permanentes · ${m?.rebotes_temporales ?? 0} temporales`} tono="text-amber-600" />
+            <StatCard titulo="Quejas de spam" valor={numero(m?.quejas ?? 0)} icon={UserX} tono="text-red-600" />
+            <StatCard titulo="Campañas" valor={numero(r?.campanas_total ?? 0)} icon={Mail}
+              detalle={`${r?.campanas_activas ?? 0} activas`} tono="text-emerald-600" />
           </div>
 
           <div className="grid gap-4 lg:grid-cols-3">
             <Card className="lg:col-span-2">
               <CardHeader>
-                <CardTitle>Evolución diaria (14 días)</CardTitle>
+                <CardTitle className="flex items-center gap-2"><TrendingUp className="h-4 w-4 text-emerald-600" /> Evolución diaria (14 días)</CardTitle>
                 <CardDescription>Envíos, entregas, rebotes y quejas registradas</CardDescription>
               </CardHeader>
               <CardContent className="h-72">
@@ -185,7 +224,7 @@ export default function PanelPage() {
                 )}
                 <div className="grid grid-cols-2 gap-2 pt-2 border-t">
                   <div className="text-center p-2 rounded-lg bg-muted/50">
-                    <p className="text-lg font-bold tabular-nums">{numero(r.contactos?.total ?? 0)}</p>
+                    <p className="text-lg font-bold tabular-nums">{numero(contactosTotal)}</p>
                     <p className="text-[11px] text-muted-foreground">Contactos</p>
                   </div>
                   <div className="text-center p-2 rounded-lg bg-muted/50">

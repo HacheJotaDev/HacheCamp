@@ -90,11 +90,19 @@ class FakeSES:
         self.sent.append(kwargs)
         return {"MessageId": f"ses-{_uuid.uuid4().hex[:16]}"}
 
-    def get_account_sending_capabilities(self):
-        return {"Max24HourSend": 50000.0, "SentLast24Hours": 0.0, "MaxPerSecond": 14.0}
-
     def get_account(self):
-        return {"DedicatedIpAutoWarmupEnabled": False}
+        # Forma real de la respuesta SESv2 GetAccount: cuotas anidadas en
+        # SendQuota {Max24HourSend, SentLast24Hours, MaxSendRate}.
+        return {
+            "SendQuota": {
+                "Max24HourSend": 50000.0,
+                "SentLast24Hours": 0.0,
+                "MaxSendRate": 14.0,
+            },
+            "SendingEnabled": True,
+            "EnforcementStatus": "PROD",
+            "DedicatedIpAutoWarmupEnabled": False,
+        }
 
     def list_email_identities(self, **kwargs):
         return {"Identities": [

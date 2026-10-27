@@ -12,6 +12,10 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
+  AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { api, Template } from "@/lib/api";
 import { EmptyState, fecha } from "@/components/shared";
 
@@ -20,6 +24,7 @@ export default function PlantillasPage() {
   const [nuevaAbierta, setNuevaAbierta] = useState(false);
   const [nombre, setNombre] = useState("");
   const [categoria, setCategoria] = useState("newsletter");
+  const [idAEliminar, setIdAEliminar] = useState<Template | null>(null);
 
   const { data: plantillas, isLoading } = useQuery({
     queryKey: ["plantillas"],
@@ -51,8 +56,17 @@ export default function PlantillasPage() {
   });
 
   const eliminar = useMutation({
-    mutationFn: (id: string) => api.delete(`/api/v1/templates/${id}`),
-    onSuccess: () => { toast.success("Plantilla eliminada"); qc.invalidateQueries({ queryKey: ["plantillas"] }); },
+    mutationFn: (id: string) =>
+      // 204 sin campañas asociadas · 200 con detalle cuando había campañas
+      api.delete<{ detalle?: string; campanas_asociadas?: number } | undefined>(
+        `/api/v1/templates/${id}`
+      ),
+    onSuccess: (res) => {
+      if (res?.detalle) toast.info(res.detalle);
+      else toast.success("Plantilla eliminada");
+      setIdAEliminar(null);
+      qc.invalidateQueries({ queryKey: ["plantillas"] });
+    },
     onError: (e: Error) => toast.error(e.message),
   });
 
@@ -110,7 +124,7 @@ export default function PlantillasPage() {
                     </Button>
                     {!t.is_system && (
                       <Button variant="ghost" size="icon" aria-label="Eliminar" className="text-red-600"
-                        onClick={() => { if (confirm(`¿Eliminar la plantilla "${t.name}"?`)) eliminar.mutate(t.id); }}>
+                        onClick={() => setIdAEliminar(t)}>
                         <Trash2 className="h-4 w-4" />
                       </Button>
                     )}
@@ -161,6 +175,37 @@ export default function PlantillasPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Confirmación de eliminación de plantilla */}
+      <AlertDialog
+        open={idAEliminar !== null}
+        onOpenChange={(v) => { if (!v) setIdAEliminar(null); }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>¿Eliminar la plantilla «{idAEliminar?.name}»?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Esta acción no se puede deshacer. Las campañas que la usaban no se rompen:
+              conservan su contenido y solo se retira la referencia.
+              Las plantillas del sistema no se pueden eliminar.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>No, cancelar</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-red-600 hover:bg-red-700"
+              disabled={eliminar.isPending}
+              onClick={(e) => {
+                e.preventDefault();
+                if (idAEliminar) eliminar.mutate(idAEliminar.id);
+              }}
+            >
+              {eliminar.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              Sí, eliminar
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

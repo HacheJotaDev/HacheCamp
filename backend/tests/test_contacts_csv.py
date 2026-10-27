@@ -165,3 +165,83 @@ def test_busqueda_y_filtro_por_estado(client, admin_auth):
     resp = client.get(f"/api/v1/contacts?q={email}&estado=suscripto")
     assert resp.status_code == 200
     assert resp.json()["total"] >= 1
+
+
+def test_alta_simplificada_no_activa_suprimido(client, admin_auth):
+    """Un correo en la lista de supresión sin contacto previo NO se crea como
+    suscripto: entra como dado_baja y no es elegible para campañas."""
+    from app.services.contacts import suppress_email
+    email = f"sup-{uuid.uuid4().hex[:6]}@test.local"
+    db = SessionLocal()
+    suppress_email(db, email, reason="prueba", source="manual")
+    db.commit()
+    db.close()
+
+    resp = client.post("/api/v1/contacts", json={"email": email})
+    assert resp.status_code == 201
+    assert resp.json()["status"] == "dado_baja"
+
+    # Sigue suprimido y sin elegibilidad
+    db = SessionLocal()
+    assert db.query(Suppression).filter(Suppression.email == email).first() is not None
+    db.close()
+    csv_data = f"email\n{email}\n".encode()
+    resp2 = client.post("/api/v1/contacts/import",
+                        files={"archivo": ("s.csv", csv_data, "text/csv")})
+    # La reimportación ya lo encuentra como dado_baja (nunca lo activa)
+    assert resp2.json()["notices"].get("existente_estado_dado_baja") == 1
+
+    # El asistente no lo cuenta como elegible (lista vacía -> preview exige lista;
+    # se verifica vía select_recipients equivalente: no está en "suscripto")
+    est = client.get(f"/api/v1/contacts?q={email}&estado=suscripto")
+    assert est.json()["total"] == 0
+
+
+def test_reimportar_suscripto_no_altera_su_suscripcion(client, admin_auth):
+    """Recrear/reesportar un contacto suscripto no cambia su estado ni duplica."""
+    email = f"act-{uuid.uuid4().hex[:6]}@test.local"
+    resp = client.post("/api/v1/contacts", json={
+        "email": email, "consent_source": "formulario_web"})
+    cid = resp.json()["id"]
+    assert resp.json()["status"] == "suscripto"
+
+    # Re-alta por formulario (solo correo) e reimportación
+    resp2 = client.post("/api/v1/contacts", json={"email": email})
+    assert resp2.json()["status"] == "suscripto"
+    csv_data = f"email\n{email}\n".encode()
+    resp3 = client.post("/api/v1/contacts/import",
+                        files={"archivo": ("r.csv", csv_data, "text/csv")})
+    r3 = resp3.json()
+    assert r3["creados"] == 0
+
+    db = SessionLocal()
+    contactos = db.query(Contact).filter(Contact.email == email).all()
+    db.close()
+    assert len(contactos) == 1
+    assert contactos[0].status == "suscripto"
+    assert contactos[0].id == cid
+
+
+def test_suprimido_con_contacto_previo_sigue_no_elegible_tras_alta(client, admin_auth):
+    """Contacto suscripto suprimido manualmente: el alta simplificada NO debe
+    reactivarlo (la supresión permanece) ni alterar su suscripción previa."""
+    from app.services.contacts import can_send_promotional, suppress_email
+    email = f"pre-{uuid.uuid4().hex[:6]}@test.local"
+    client.post("/api/v1/contacts", json={"email": email})
+    db = SessionLocal()
+    suppress_email(db, email, reason="manual_admin", source="manual")
+    db.commit()
+    db.close()
+
+    # Re-alta simplificada (lo que haría un usuario al reescribir el correo)
+    resp = client.post("/api/v1/contacts", json={"email": email})
+    assert resp.status_code == 201
+
+    db = SessionLocal()
+    c = db.query(Contact).filter(Contact.email == email).first()
+    sup = db.query(Suppression).filter(Suppression.email == email).first()
+    elegible_promo = can_send_promotional(db, c)
+    db.close()
+    assert sup is not None                 # la supresión permanece (autoridad)
+    assert c.status == "suscripto"         # la suscripción previa no se altera
+    assert elegible_promo == (False, "en_supresion")   # y NO es elegible

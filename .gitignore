@@ -38,3 +38,4 @@ backups/
 # IDE
 .idea/
 .vscode/
+frontend/tsconfig.tsbuildinfo

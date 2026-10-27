@@ -70,7 +70,7 @@ Errores: JSON `{"detail": "mensaje"}` con códigos HTTP convencionales (401 no a
 | POST | `/templates/{id}/restore/{version}` | Restaurar versión |
 | GET | `/templates/variables` | Catálogo de variables |
 | POST | `/templates/preview` | `{mode, blocks?, html?}` → HTML sanitizado (para iframe aislado) |
-| POST | `/templates/test-send` | `{to_email, from_email, subject, mode, blocks?/html?}` → envío real de prueba |
+| POST | `/templates/test-send` | `{to_email, mode, blocks?/html?}` → envío real de prueba; remitente y asunto SIEMPRE de `system/mail-config` (los campos de remitente/asunto del payload se ignoran) |
 
 ## Campañas
 
@@ -101,6 +101,8 @@ Errores: JSON `{"detail": "mensaje"}` con códigos HTTP convencionales (401 no a
 | GET | `/system/ses/status` | Región, cuota real, identidades verificadas |
 | GET | `/system/audit` | Auditoría (solo admin, paginada) |
 | GET/PUT | `/system/settings/{key}` | Ajustes editables (`default_from_name`, `default_from_email`, `default_reply_to`) |
+| GET | `/system/mail-config` | Remitente y asunto predeterminados (lectura: cualquier usuario autenticado) |
+| PUT | `/system/mail-config` | Guardar remitente y asunto predeterminados (solo admin; dominio exclusivo `leisureparts4u.store`, anti inyección de cabeceras) |
 
 ## Endpoints públicos (sin sesión, con protecciones propias)
 
