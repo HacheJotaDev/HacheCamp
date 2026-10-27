@@ -57,11 +57,21 @@ async function request<T>(
     let detail = `Error ${res.status}`;
     try {
       const data = await res.json();
-      detail = typeof data.detail === "string"
-        ? data.detail
-        : Array.isArray(data.detail)
-          ? data.detail.map((d: { msg?: string }) => d.msg).join("; ")
-          : JSON.stringify(data.detail ?? data);
+      if (typeof data.detail === "string") {
+        detail = data.detail;
+      } else if (Array.isArray(data.detail)) {
+        // Errores de validación FastAPI (422): incluye el campo afectado
+        // para que el mensaje sea comprensible (p. ej. "campo 'archivo': Field required").
+        detail = data.detail
+          .map((d: { loc?: unknown[]; msg?: string }) => {
+            const loc = Array.isArray(d.loc) ? d.loc.filter((p) => p !== "body") : [];
+            const campo = loc.length ? `campo '${loc.join(".")}'` : "";
+            return campo ? `${campo}: ${d.msg ?? "error"}` : (d.msg ?? "error");
+          })
+          .join("; ");
+      } else {
+        detail = JSON.stringify(data.detail ?? data);
+      }
     } catch {
       /* respuesta sin JSON */
     }
@@ -75,11 +85,14 @@ async function request<T>(
 
 export const api = {
   get: <T,>(path: string) => request<T>("GET", path),
-  post: <T,>(path: string, json?: unknown) => request<T>("POST", path, { json }),
+  // `json` exige un objeto plano: evita pasar por error un FormData
+  // (que se serializaría como "{}" y provocaría "Field required" en la API).
+  // Para archivos usa api.postForm(path, formData).
+  post: <T,>(path: string, json?: Record<string, unknown>) => request<T>("POST", path, { json }),
   postForm: <T,>(path: string, formData: FormData) =>
     request<T>("POST", path, { formData }),
-  put: <T,>(path: string, json?: unknown) => request<T>("PUT", path, { json }),
-  patch: <T,>(path: string, json?: unknown) => request<T>("PATCH", path, { json }),
+  put: <T,>(path: string, json?: Record<string, unknown>) => request<T>("PUT", path, { json }),
+  patch: <T,>(path: string, json?: Record<string, unknown>) => request<T>("PATCH", path, { json }),
   delete: <T,>(path: string) => request<T>("DELETE", path),
 };
 

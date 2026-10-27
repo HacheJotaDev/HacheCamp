@@ -45,7 +45,7 @@ export default function CampanaDetallePage({ params }: { params: Promise<{ id: s
   });
 
   const accion = useMutation({
-    mutationFn: ({ path, body }: { path: string; body?: unknown }) =>
+    mutationFn: ({ path, body }: { path: string; body?: Record<string, unknown> }) =>
       api.post<{ estado?: string; [k: string]: unknown }>(`/api/v1/campaigns/${id}/${path}`, body ?? {}),
     onSuccess: (res) => {
       toast.success("Acción realizada" + (res.estado ? `: ${res.estado.replace("_", " ")}` : ""));

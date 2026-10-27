@@ -30,7 +30,8 @@ export default function ContactosPage() {
   const [listId, setListId] = useState("todas");
   const [page, setPage] = useState(1);
   const [seleccion, setSeleccion] = useState<Set<string>>(new Set());
-  const [dialogoBorrado, setDialogoBorrado] = useState(false);
+  // ids a eliminar en el diálogo de confirmación (selección múltiple o fila individual)
+  const [idsAEliminar, setIdsAEliminar] = useState<string[] | null>(null);
   const qc = useQueryClient();
 
   const filtros = useMemo(() => {
@@ -59,13 +60,13 @@ export default function ContactosPage() {
   const borrarMasivo = useMutation({
     mutationFn: (modo: "eliminar" | "dar_baja") =>
       api.post<{ procesados: number }>("/api/v1/contacts/bulk-delete", {
-        ids: Array.from(seleccion), modo, confirmar: true,
+        ids: idsAEliminar ?? [], modo, confirmar: true,
       }),
     onSuccess: (res, modo) => {
       toast.success(modo === "eliminar"
         ? `${res.procesados} contacto(s) eliminados`
         : `${res.procesados} contacto(s) dados de baja y suprimidos`);
-      setDialogoBorrado(false);
+      setIdsAEliminar(null);
       invalidar();
     },
     onError: (e: Error) => toast.error(e.message),
@@ -99,7 +100,7 @@ export default function ContactosPage() {
         <div className="flex flex-wrap items-center gap-3 rounded-lg border bg-emerald-500/5 px-4 py-3 text-sm">
           <span className="font-medium">{seleccion.size} seleccionado(s)</span>
           <div className="flex gap-2 ml-auto">
-            <Button size="sm" variant="outline" onClick={() => setDialogoBorrado(true)}>
+            <Button size="sm" variant="outline" onClick={() => setIdsAEliminar(Array.from(seleccion))}>
               <Trash2 className="mr-1.5 h-4 w-4" /> Eliminar seleccionados
             </Button>
             <Button size="sm" variant="ghost" onClick={() => setSeleccion(new Set())}>
@@ -196,9 +197,18 @@ export default function ContactosPage() {
                         </TableCell>
                         <TableCell className="hidden md:table-cell text-sm text-muted-foreground">{fecha(c.created_at)}</TableCell>
                         <TableCell className="text-right">
-                          <Button variant="ghost" size="icon" asChild aria-label="Ver detalle">
-                            <Link href={`/panel/contactos/${c.id}`}><Eye className="h-4 w-4" /></Link>
-                          </Button>
+                          <div className="flex items-center justify-end gap-0.5">
+                            <Button variant="ghost" size="icon" asChild aria-label="Ver detalle">
+                              <Link href={`/panel/contactos/${c.id}`}><Eye className="h-4 w-4" /></Link>
+                            </Button>
+                            <Button
+                              variant="ghost" size="icon" aria-label={`Eliminar ${c.email}`}
+                              className="text-red-600 hover:text-red-700"
+                              onClick={() => setIdsAEliminar([c.id])}
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </Button>
+                          </div>
                         </TableCell>
                       </TableRow>
                     ))}
@@ -221,13 +231,21 @@ export default function ContactosPage() {
         </CardContent>
       </Card>
 
-      {/* Confirmación de eliminación masiva */}
-      <AlertDialog open={dialogoBorrado} onOpenChange={setDialogoBorrado}>
+      {/* Confirmación de eliminación (individual o masiva) */}
+      <AlertDialog
+        open={idsAEliminar !== null}
+        onOpenChange={(v) => { if (!v) setIdsAEliminar(null); }}
+      >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>¿Eliminar {seleccion.size} contacto(s)?</AlertDialogTitle>
+            <AlertDialogTitle>
+              {idsAEliminar && idsAEliminar.length === 1
+                ? "¿Eliminar este contacto?"
+                : `¿Eliminar ${idsAEliminar?.length ?? 0} contacto(s)?`}
+            </AlertDialogTitle>
             <AlertDialogDescription>
-              Puedes <b>eliminarlos definitivamente</b> (borra también su historial de envíos)
+              Puedes <b>eliminarlos definitivamente</b> (borra también su historial de envíos;
+              las supresiones y la auditoría se conservan)
               o <b>darlos de baja</b> (quedan en supresión y nunca recibirán campañas).
               Esta acción no se puede deshacer.
             </AlertDialogDescription>
@@ -322,7 +340,9 @@ function ImportarDialog({ onImportado }: { onImportado: () => void }) {
     mutationFn: async () => {
       const fd = new FormData();
       fd.append("archivo", archivo!);
-      return api.post<ImportPreview>("/api/v1/contacts/import/preview", fd);
+      // IMPORTANTE: postForm (no post). api.post serializaría el FormData como
+      // JSON "{}" y la API respondería 422 "Field required" (campo 'archivo').
+      return api.postForm<ImportPreview>("/api/v1/contacts/import/preview", fd);
     },
     onSuccess: setPreview,
     onError: (e: Error) => toast.error(e.message),
@@ -333,9 +353,9 @@ function ImportarDialog({ onImportado }: { onImportado: () => void }) {
       const fd = new FormData();
       fd.append("archivo", archivo!);
       fd.append("consent_source", "importacion_csv");
-      fd.append("list_ids", listId ? JSON.stringify([listId]) : "[]");
+      fd.append("list_ids", listId && listId !== "sin" ? JSON.stringify([listId]) : "[]");
       fd.append("dry_run", "false");
-      return api.post<Record<string, unknown>>("/api/v1/contacts/import", fd);
+      return api.postForm<Record<string, unknown>>("/api/v1/contacts/import", fd);
     },
     onSuccess: (res) => {
       setResultado(res);
