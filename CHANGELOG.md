@@ -29,6 +29,12 @@ métricas correctas y visibilidad de entregabilidad honesta.
 - **Alta simplificada**: el formulario pide exclusivamente el correo electrónico.
   No se vuelve a pedir consentimiento a contactos ya suscriptos; los estados y
   bajas existentes se conservan sin inventar autorizaciones.
+  **Protección anti-reactivación (revisión final)**: un correo que esté en la
+  lista de supresión **nunca** pasa a «suscripto» — si no tiene contacto previo
+  se crea como «dado_baja» (aviso `correo_suprimido`); si ya existe como
+  suscripto, la supresión permanece y lo sigue excluyendo de envíos
+  (`can_send_promotional` → `en_supresion`). Reimportar un suscripto no altera
+  su suscripción ni duplica registros. Cubierto por 3 pruebas nuevas.
 - **Importación CSV y TXT**: TXT con un correo por línea; deduplicación
   automática (en archivo y contra la base), validación de direcciones,
   codificaciones UTF-8/Latin-1 y asignación opcional a lista.
@@ -103,17 +109,18 @@ métricas correctas y visibilidad de entregabilidad honesta.
 
 ### Pruebas
 
-- Suite backend: **107 pruebas** (80 previas + 24 nuevas en
-  `tests/test_pro_v2.py` + 3 de endurecimiento de seguridad: bloqueo SSRF de
-  IPs internas/metadata, CSS `behavior:url` eliminado). Todas en verde con
-  SES/SQS simulados.
+- Suite backend: **110 pruebas** (80 previas + 24 nuevas en `tests/test_pro_v2.py`
+  + 3 de endurecimiento de seguridad: bloqueo SSRF de IPs internas/metadata, CSS
+  `behavior:url` eliminado + 3 de contactos: suprimido no se activa, suscripto
+  no se altera al reimportar, supresión previa se conserva). Todas en verde
+  con SES/SQS simulados.
 - Frontend: `next build` completo en verde con todas las páginas nuevas.
 
 ### Estado de las funciones (v2.0.0)
 
 | Función | Estado |
 |---|---|
-| Contactos solo-email, import CSV/TXT, dedup, borrado masivo | ✅ Completa (probada) |
+| Contactos solo-email, import CSV/TXT, dedup, borrado masivo, protección anti-reactivación de suprimidos | ✅ Completa (probada) |
 | Asistente de campañas en 5 pasos con conteo previo | ✅ Completa (probada) |
 | CSS `<style>` conservado e inlineado (Premailer) | ✅ Completa (probada) |
 | Cola en tiempo real con pausar/reanudar/cancelar | ✅ Completa (probada) |
@@ -124,6 +131,22 @@ métricas correctas y visibilidad de entregabilidad honesta.
 | **Medición real de Inbox vs Spam** | ⏳ **Pendiente**: requiere seedlist autorizada o servicio externo; la página muestra «No disponible» honestamente |
 | Aperturas/clics reales (píxeles y enlaces) | ✅ Disponible vía tracking propio (requiere imágenes habilitadas en el cliente) |
 | Despliegue real en VPS | ⏳ Pendiente de autorización (revisar PR #1 y seguir `docs/ACTUALIZACION_V2.md`)
+
+### Corregido en la revisión final (respaldos y restauración)
+
+- `docs/ACTUALIZACION_V2.md`: el respaldo obligatorio es **`pg_dump` con
+  `set -o pipefail`** + verificación de integridad (tamaño no nulo, `gzip -t`,
+  marcador «PostgreSQL database dump complete») + **restauración de prueba no
+  destructiva** en contenedor desechable (demuestra que el dump es restaurable
+  y cuenta registros reales, sin tocar la base de producción).
+- El `tar` en caliente del volumen (inconsistente con PostgreSQL en marcha) se
+  eliminó del procedimiento; la copia física es **opcional** con
+  **`pg_basebackup`** (mecanismo consistente de PostgreSQL) y sus requisitos
+  documentados (`-u postgres` porque `pg_basebackup` rechaza root, espacio en
+  disco, replicación local por socket del contenedor).
+- La restauración de datos ya **no incluye comandos destructivos automáticos**:
+  exige confirmación explícita escrita (`RESTAURAR`), restaura en un **volumen
+  nuevo** apuntado con override temporal y el volumen original queda intacto.
 
 ## [1.0.1] — 2026-10-27
 
