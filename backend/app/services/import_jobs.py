@@ -20,7 +20,9 @@ Diseño (motivado por el fallo de producción con 50.656 correos):
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 from typing import Any, Dict, List, Optional
+from uuid import uuid4
 
 from sqlalchemy.orm import Session
 
@@ -30,10 +32,83 @@ from app.core.logging_conf import get_logger
 from app.models import ImportJob, ImportJobData
 from app.services import contacts as contact_service
 from app.services import queue as queues
+from app.workers.redis_client import get_redis
 
 logger = get_logger("hj.import_jobs")
 
 MAX_ERROR_SAMPLES = 20
+
+# --------------------------------------------------------------------------- #
+# Lock por trabajo (evita doble procesamiento si se escala el worker)
+# --------------------------------------------------------------------------- #
+
+IMPORT_LOCK_PREFIX = "hj:lock:import:"
+
+_LOCK_RELEASE_LUA = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('DEL', KEYS[1])
+end
+return 0
+"""
+
+_LOCK_RENEW_LUA = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('EXPIRE', KEYS[1], ARGV[2])
+end
+return 0
+"""
+
+
+def _lock_ttl() -> int:
+    return max(int(settings.IMPORT_LOCK_TTL_SECONDS), 60)
+
+
+def acquire_import_lock(job_id: str) -> Optional[str]:
+    """Intenta tomar el lock del trabajo. Devuelve el token o None si otro
+    worker lo tiene. SET NX EX: expira solo (worker muerto no bloquea para
+    siempre) y el token garantiza que solo el dueño libera/renueva."""
+    token = uuid4().hex
+    try:
+        r = get_redis()
+    except Exception:
+        return None
+    try:
+        if r.set(f"{IMPORT_LOCK_PREFIX}{job_id}", token, nx=True, ex=_lock_ttl()):
+            return token
+    except Exception:
+        return None
+    return None
+
+
+def renew_import_lock(job_id: str, token: Optional[str]) -> bool:
+    """Renueva el TTL del lock SI el token sigue siendo el dueño (Lua atómico).
+    Se llama por lote: trabajos de horas no pierden el lock por TTL."""
+    if not token:
+        return False
+    try:
+        r = get_redis()
+        return bool(r.eval(_LOCK_RENEW_LUA, 1, f"{IMPORT_LOCK_PREFIX}{job_id}",
+                           token, _lock_ttl()))
+    except Exception:
+        return False
+
+
+def release_import_lock(job_id: str, token: Optional[str]) -> None:
+    """Libera el lock SOLO si el token coincide (nunca el de otro worker)."""
+    if not token:
+        return
+    try:
+        get_redis().eval(_LOCK_RELEASE_LUA, 1, f"{IMPORT_LOCK_PREFIX}{job_id}", token)
+    except Exception:
+        pass  # el TTL lo limpiará
+
+
+def job_locked(job_id: str) -> bool:
+    """True si el trabajo tiene lock vivo (otro worker lo está procesando)."""
+    try:
+        return bool(get_redis().exists(f"{IMPORT_LOCK_PREFIX}{job_id}"))
+    except Exception:
+        return False
 
 
 # --------------------------------------------------------------------------- #
@@ -157,6 +232,39 @@ def recover_pending_jobs(db: Session) -> List[str]:
             logger.error("No se pudo reencolar import %s: %s", job.id, type(exc).__name__)
     if encolados:
         logger.warning("Importaciones reencoladas tras reinicio", extra={"cantidad": len(encolados)})
+    return encolados
+
+
+def recover_stuck_jobs(db: Session, *, min_age_seconds: Optional[int] = None) -> List[str]:
+    """Recuperación PERIÓDICA (no solo al arrancar).
+
+    Reencola trabajos estancados:
+    - 'pendiente' con edad > mínima: el enqueue original falló y nadie lo
+      tomará (antes quedaban varados para siempre si fallaba el lpush).
+    - 'procesando' con edad > mínima y SIN lock vivo: el worker murió a mitad;
+      se reanuda desde rows_processed (idempotente).
+    Los 'procesando' CON lock vivo pertenecen a un worker activo: no se tocan.
+    """
+    edad = settings.IMPORT_JOB_MIN_AGE_SECONDS if min_age_seconds is None else min_age_seconds
+    limite = utcnow() - timedelta(seconds=max(edad, 0))
+    vivos = (
+        db.query(ImportJob)
+        .filter(ImportJob.status.in_(["pendiente", "procesando"]),
+                ImportJob.updated_at < limite)
+        .all()
+    )
+    encolados: List[str] = []
+    for job in vivos:
+        if job.status == "procesando" and job_locked(job.id):
+            continue  # worker activo con lock vigente: no tocar
+        try:
+            enqueue(job.id)
+            encolados.append(job.id)
+        except Exception as exc:
+            logger.error("No se pudo reencolar import %s: %s", job.id, type(exc).__name__)
+    if encolados:
+        logger.warning("Recuperación periódica: importaciones reencoladas",
+                       extra={"cantidad": len(encolados)})
     return encolados
 
 
@@ -287,6 +395,22 @@ def process_job(db: Session, job_id: str, *, batch_size: Optional[int] = None) -
         return {"accion": "error", "motivo": "payload_perdido"}
 
     filas: List[Dict[str, Any]] = json.loads(data.payload)
+
+    # Lock por trabajo: si otro worker lo está procesando (instancia escalada,
+    # reintento solapado), este lo omite. Contadores inflados = 0; duplicados = 0.
+    token = acquire_import_lock(job_id)
+    if not token:
+        return {"accion": "omitido", "motivo": "lock_activo_otro_worker"}
+
+    try:
+        return _procesar_con_lock(db, job_id, job, filas, batch, token)
+    finally:
+        release_import_lock(job_id, token)
+
+
+def _procesar_con_lock(db: Session, job_id: str, job: ImportJob,
+                       filas: List[Dict[str, Any]], batch: int, token: str) -> Dict[str, Any]:
+    """Cuerpo de process_job con lock en mano (renueva por lote)."""
     offset = min(job.rows_processed, len(filas))
     total = len(filas)
 
@@ -329,6 +453,14 @@ def process_job(db: Session, job_id: str, *, batch_size: Optional[int] = None) -
                 db.commit()
                 return {"accion": "error", "motivo": type(exc).__name__, "offset": offset}
             continue  # reintenta el mismo lote (idempotente)
+
+        # Renovación del lock por lote: trabajos largos no caducan. Si el lock
+        # se perdió (TTL vencido y otro worker lo tomó), este se retira: el
+        # otro continúa desde rows_processed sin duplicar nada.
+        if not renew_import_lock(job_id, token):
+            logger.warning("Lock de importación perdido a mitad de trabajo",
+                           extra={"job": job_id, "procesadas": offset})
+            return {"accion": "omitido", "motivo": "lock_perdido", "procesadas": offset}
 
         offset += len(lote)
 

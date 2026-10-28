@@ -18,6 +18,7 @@ import json
 import signal
 import time
 
+from app.core.config import settings
 from app.core.db import SessionLocal, utcnow
 from app.core.logging_conf import get_logger, setup_logging
 from app.models import ImportJob
@@ -61,6 +62,7 @@ def run_forever(poll_interval: int = 5) -> None:
     """Bucle principal del worker de importaciones."""
     setup_logging()
     logger.info("Worker de importaciones iniciado")
+    last_recovery = 0.0
     while _running:
         try:
             heartbeat.beat("import_worker")
@@ -70,8 +72,8 @@ def run_forever(poll_interval: int = 5) -> None:
                 continue
 
             # Recuperación tras reinicio: reencola vivos (pendiente/procesando).
-            # Se hace una vez por arranque; recuperar_stuck en cada ciclo sería
-            # innecesario: el propio worker drena la cola.
+            # Se hace una vez por arranque; la recuperación PERIÓDICA de
+            # estancados va más abajo (cubre trabajos varados sin reinicio).
             if not getattr(run_forever, "_recovered", False):
                 db = SessionLocal()
                 try:
@@ -79,6 +81,20 @@ def run_forever(poll_interval: int = 5) -> None:
                 finally:
                     db.close()
                 run_forever._recovered = True  # type: ignore[attr-defined]
+
+            # Recuperación periódica: 'pendiente' que nadie tomó y 'procesando'
+            # sin lock vivo (worker muerto a mitad), con edad mínima. Idempotente:
+            # el reanudado continúa desde rows_processed y el lock evita solapes.
+            now = time.time()
+            if now - last_recovery >= max(settings.IMPORT_RECOVERY_INTERVAL_SECONDS, 30):
+                last_recovery = now
+                db = SessionLocal()
+                try:
+                    import_service.recover_stuck_jobs(db)
+                except Exception as exc:
+                    logger.error("Recuperación periódica falló", extra={"error": type(exc).__name__})
+                finally:
+                    db.close()
 
             jid = queues.pop_import_job(timeout_seconds=3)
             if not jid:

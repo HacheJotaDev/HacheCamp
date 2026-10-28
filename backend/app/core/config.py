@@ -105,6 +105,9 @@ class Settings(BaseSettings):
     # --- Importación asíncrona -------------------------------------------------
     IMPORT_BATCH_SIZE: int = 500            # filas por lote (un commit por lote)
     IMPORT_LOT_RETRIES: int = 3             # reintentos de un lote antes de fallar el trabajo
+    IMPORT_LOCK_TTL_SECONDS: int = 900      # lock Redis por trabajo (renovado por lote)
+    IMPORT_RECOVERY_INTERVAL_SECONDS: int = 60  # recuperación periódica de estancados
+    IMPORT_JOB_MIN_AGE_SECONDS: int = 60    # edad mínima para considerar un trabajo estancado
 
     # --- Logging ---------------------------------------------------------------
     LOG_LEVEL: str = "INFO"
