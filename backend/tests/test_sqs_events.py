@@ -212,7 +212,10 @@ def test_confirmacion_de_suscripcion(client, sqs_on, firma_local):
     from app.services import sqs_events
     res = sqs_events.poll_once(fake)
 
-    assert res["descartados"] == 1  # gestionada y borrada
+    # La gestión SNS NO es un descarte: se contabiliza como sns_acks
+    # (antes se contaba como descartado y falseaba el diagnóstico).
+    assert res["sns_acks"] == 1
+    assert res["descartados"] == 0
     db = SessionLocal()
     ack = db.query(SesEvent).filter(SesEvent.type == "sns_ack").first()
     assert ack is not None

@@ -26,6 +26,7 @@ from app.core.db import SessionLocal
 from app.core.logging_conf import get_logger
 from app.models import SesEvent
 from app.services import events as events_service
+from app.workers import heartbeat
 
 logger = get_logger("hj.sqs")
 
@@ -78,6 +79,23 @@ def _extraer_evento(cuerpo: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if "eventType" in cuerpo or "notificationType" in cuerpo:
         return cuerpo
     return None
+
+
+def _registrar_descarte(db, sqs_id: str, motivo: str, receive_count: int) -> None:
+    """Deja rastro consultable en BD de todo descarte (para diagnóstico).
+
+    Idempotente por sqs_id: si el mensaje reaparece no duplica filas.
+    """
+    try:
+        existente = db.query(SesEvent).filter(
+            SesEvent.event_uid == f"sqs:{sqs_id}:descartado").first()
+        if existente:
+            return
+        db.add(SesEvent(event_uid=f"sqs:{sqs_id}:descartado", type="sqs_descartado",
+                        payload={"motivo": motivo, "lecturas": receive_count}))
+        db.commit()
+    except Exception:
+        db.rollback()
 
 
 def procesar_mensaje(db, sqs_message: Dict[str, Any]) -> Dict[str, Any]:
@@ -176,7 +194,7 @@ def poll_once(client: Any, *, max_messages: Optional[int] = None,
     )
     mensajes = resp.get("Messages", [])
     contadores = {"recibidos": len(mensajes), "procesados": 0, "duplicados": 0,
-                  "descartados": 0, "errores": 0}
+                  "sns_acks": 0, "descartados": 0, "errores": 0}
     if not mensajes:
         return contadores
 
@@ -207,16 +225,25 @@ def poll_once(client: Any, *, max_messages: Optional[int] = None,
 
                 resultado = procesar_mensaje(db, item)
                 accion = resultado.get("accion")
-                if accion in ("procesado", "duplicado_ignorado", "suscripcion_confirmada",
-                              "desuscripcion_registrada", "descartado"):
-                    if accion == "procesado":
-                        contadores["procesados"] += 1
-                        logger.info("Evento SES procesado (SQS)",
-                                    extra={"tipo": resultado.get("tipo"), "sqs_id": sqs_id[:36]})
-                    elif accion == "duplicado_ignorado":
-                        contadores["duplicados"] += 1
-                    else:
-                        contadores["descartados"] += 1
+                if accion == "procesado":
+                    contadores["procesados"] += 1
+                    logger.info("Evento SES procesado (SQS)",
+                                extra={"tipo": resultado.get("tipo"), "sqs_id": sqs_id[:36]})
+                    a_borrar.append({"Id": sqs_id, "ReceiptHandle": receipt})
+                elif accion == "duplicado_ignorado":
+                    contadores["duplicados"] += 1
+                    a_borrar.append({"Id": sqs_id, "ReceiptHandle": receipt})
+                elif accion in ("suscripcion_confirmada", "desuscripcion_registrada"):
+                    # Gestión administrativa de SNS: NO es un descarte ni un evento
+                    # perdido; se contabiliza aparte para no falsear el diagnóstico.
+                    contadores["sns_acks"] += 1
+                    logger.info("Gestión SNS en cola SQS",
+                                extra={"accion": accion, "sqs_id": sqs_id[:36]})
+                    a_borrar.append({"Id": sqs_id, "ReceiptHandle": receipt})
+                elif accion == "descartado":
+                    contadores["descartados"] += 1
+                    _registrar_descarte(db, sqs_id, str(resultado.get("motivo", "desconocido")),
+                                        receive_count)
                     a_borrar.append({"Id": sqs_id, "ReceiptHandle": receipt})
                 else:
                     contadores["errores"] += 1
@@ -242,6 +269,9 @@ def poll_once(client: Any, *, max_messages: Optional[int] = None,
             logger.error("No se pudo confirmar (delete) el lote SQS",
                          extra={"error": type(exc).__name__, "cantidad": len(a_borrar)})
             contadores["errores"] += len(a_borrar)
+    # Resumen estructurado del lote: permite ver la salud del pipeline de
+    # eventos sin depender de líneas sueltas. Los sns_acks NO son descartes.
+    logger.info("Lote SQS consumido", extra={**contadores})
     return contadores
 
 
@@ -280,7 +310,10 @@ def _bucle_consumidor(stop: threading.Event) -> None:
     while not stop.is_set():
         try:
             cliente = _client()
-            poll_once(cliente)
+            contadores = poll_once(cliente)
+            # Latido del consumidor: visible en /system/ses/diagnostico y usado
+            # para saber si el pipeline de eventos está vivo.
+            heartbeat.beat("sqs_consumer", ttl_seconds=600, extra=contadores)
         except SQSNotConfigured:
             logger.warning("SQS deshabilitado a mitad de ejecución; el hilo termina")
             return

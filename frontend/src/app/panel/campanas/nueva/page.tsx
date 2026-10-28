@@ -38,6 +38,9 @@ export default function NuevaCampanaPage() {
   const [segmentId, setSegmentId] = useState("");
   const [modo, setModo] = useState<"bloques" | "html">("html");
   const [templateId, setTemplateId] = useState("");
+  // Origen del contenido: plantilla guardada (bloques o HTML) o HTML pegado a mano.
+  // El modo real de la campaña (bloques|html) lo fija la plantilla elegida.
+  const [origen, setOrigen] = useState<"plantilla" | "manual">("manual");
   const [html, setHtml] = useState("");
   const [bloques, setBloques] = useState<Template["blocks"]>([]);
   const [momento, setMomento] = useState<"ahora" | "programar">("ahora");
@@ -61,6 +64,18 @@ export default function NuevaCampanaPage() {
   });
   const asunto = correoConfig?.subject ?? "";
 
+  // Vista previa del contenido elegido (mismo endpoint que usa el editor de
+  // plantillas: render + sanitización sin JavaScript, CSS inlineado)
+  const { data: vistaPrevia } = useQuery({
+    queryKey: ["preview-campana", modo, bloques, html],
+    queryFn: () =>
+      api.post<{ html: string }>("/api/v1/templates/preview", {
+        mode: modo, blocks: modo === "bloques" ? bloques : undefined,
+        html: modo === "html" ? html : undefined,
+      }),
+    enabled: origen === "plantilla" && Boolean(templateId),
+  });
+
   const { data: estimacion, isFetching: contando } = useQuery({
     queryKey: ["preview-destinatarios", listId, segmentId, categoria],
     queryFn: () =>
@@ -74,10 +89,18 @@ export default function NuevaCampanaPage() {
     setTemplateId(id);
     const t = plantillas?.find((p) => p.id === id);
     if (t) {
+      // Funciona igual con plantillas de bloques y plantillas HTML:
+      // fija el modo de la campaña y carga su contenido (original intacto).
       setModo(t.mode);
       setBloques(t.blocks ?? []);
       setHtml(t.html ?? "");
     }
+  };
+
+  const cambiarOrigen = (v: string) => {
+    setOrigen(v as "plantilla" | "manual");
+    // Al pasar a HTML propio se desvincula la plantilla: lo pegado a mano manda
+    if (v === "manual") setTemplateId("");
   };
 
   const fechaIsoUtc = (): string | null => {
@@ -140,7 +163,9 @@ export default function NuevaCampanaPage() {
   const paso1Valido = Boolean(listId || segmentId);
   // Sin asunto configurado no se puede continuar: es la fuente única de todos los envíos
   const paso2Valido = asunto.trim().length > 0;
-  const paso3Valido = modo === "bloques" ? (bloques?.length ?? 0) > 0 : html.trim().length > 0;
+  const paso3Valido = origen === "plantilla"
+    ? Boolean(templateId) && (modo === "bloques" ? (bloques?.length ?? 0) > 0 : html.trim().length > 0)
+    : html.trim().length > 0;
   const paso4Valido = momento === "ahora" || (fechaHora && fechaIsoUtc());
   const nombreCampana = nombre.trim() || asunto.trim().slice(0, 40) || "Campaña";
 
@@ -273,19 +298,64 @@ export default function NuevaCampanaPage() {
       {paso === 3 && (
         <Card>
           <CardContent className="p-4 space-y-3">
-            <RadioGroup value={modo} onValueChange={(v) => setModo(v as "bloques" | "html")}
-              className="flex gap-4">
+            <RadioGroup value={origen} onValueChange={cambiarOrigen} className="flex gap-4">
               <div className="flex items-center space-x-2">
-                <RadioGroupItem value="html" id="m-html" />
-                <Label htmlFor="m-html" className="font-normal">Pegar HTML</Label>
+                <RadioGroupItem value="plantilla" id="m-plantilla" disabled={!plantillas?.length} />
+                <Label htmlFor="m-plantilla" className="font-normal">Usar una plantilla guardada</Label>
               </div>
               <div className="flex items-center space-x-2">
-                <RadioGroupItem value="bloques" id="m-bloques" disabled={!plantillas?.some((t) => t.mode === "bloques")} />
-                <Label htmlFor="m-bloques" className="font-normal">Usar plantilla del editor</Label>
+                <RadioGroupItem value="manual" id="m-manual" />
+                <Label htmlFor="m-manual" className="font-normal">Pegar HTML propio</Label>
               </div>
             </RadioGroup>
 
-            {modo === "html" ? (
+            {origen === "plantilla" ? (
+              <div className="space-y-3">
+                <div className="space-y-1.5">
+                  <Label>Plantilla (bloques o HTML)</Label>
+                  <Select value={templateId} onValueChange={elegirPlantilla}>
+                    <SelectTrigger><SelectValue placeholder="Elige una plantilla" /></SelectTrigger>
+                    <SelectContent>
+                      {plantillas?.map((t) => (
+                        <SelectItem key={t.id} value={t.id}>
+                          {t.name} · {t.mode === "bloques" ? "Bloques" : "HTML"}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">
+                    Aparecen todas tus plantillas: del editor de bloques y las HTML guardadas.
+                  </p>
+                </div>
+                {templateId && modo === "bloques" && (
+                  <div className="rounded-lg border p-3 text-sm">
+                    Contenido cargado: <b>{bloques?.length ?? 0} bloques</b>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      {bloques?.map((b) => (b as { type: string }).type).join(" · ")}
+                    </p>
+                  </div>
+                )}
+                {templateId && modo === "html" && (
+                  <div className="rounded-lg border p-3 text-sm">
+                    Plantilla HTML cargada: <b>{plantillas?.find((t) => t.id === templateId)?.name}</b>
+                    <p className="text-xs text-muted-foreground mt-1">
+                      La campaña usará el HTML de la plantilla; el original queda intacto.
+                    </p>
+                  </div>
+                )}
+                {templateId && vistaPrevia?.html && (
+                  <div className="space-y-1.5">
+                    <Label>Vista previa</Label>
+                    <iframe
+                      title="Vista previa de la plantilla"
+                      sandbox=""
+                      srcDoc={vistaPrevia.html}
+                      className="h-[360px] w-full rounded-lg border bg-white"
+                    />
+                  </div>
+                )}
+              </div>
+            ) : (
               <div className="space-y-1.5">
                 <Label>HTML (los estilos de &lt;style&gt; se convierten automáticamente a inline)</Label>
                 <Textarea
@@ -297,28 +367,6 @@ export default function NuevaCampanaPage() {
                   Compatible con CSS en &lt;style&gt;: se protege el diseño y se inlinea para clientes de correo.
                   El JavaScript se elimina siempre.
                 </p>
-              </div>
-            ) : (
-              <div className="space-y-3">
-                <div className="space-y-1.5">
-                  <Label>Plantilla</Label>
-                  <Select value={templateId} onValueChange={elegirPlantilla}>
-                    <SelectTrigger><SelectValue placeholder="Elige una plantilla" /></SelectTrigger>
-                    <SelectContent>
-                      {plantillas?.filter((t) => t.mode === "bloques").map((t) => (
-                        <SelectItem key={t.id} value={t.id}>{t.name}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                {bloques && bloques.length > 0 && (
-                  <div className="rounded-lg border p-3 text-sm">
-                    Contenido cargado: <b>{bloques.length} bloques</b>
-                    <p className="text-xs text-muted-foreground mt-1">
-                      {bloques.map((b) => (b as { type: string }).type).join(" · ")}
-                    </p>
-                  </div>
-                )}
               </div>
             )}
             <div className="flex justify-between pt-1">
@@ -404,9 +452,10 @@ export default function NuevaCampanaPage() {
                 ? listas?.find((l) => l.id === listId)?.name ?? "lista"
                 : segmentos?.find((s) => s.id === segmentId)?.name ?? "segmento"
               } · ${numero(estimacion?.destinatarios ?? 0)} elegibles`} />
-            <Resumen etiqueta="Contenido" valor={modo === "bloques"
-              ? `Plantilla (${bloques?.length ?? 0} bloques)`
-              : "HTML propio con CSS inlineado"} />
+            <Resumen etiqueta="Contenido" valor={
+              origen === "plantilla" && templateId
+                ? `Plantilla: ${plantillas?.find((t) => t.id === templateId)?.name ?? ""} (${modo === "bloques" ? `${bloques?.length ?? 0} bloques` : "HTML"})`
+                : "HTML propio con CSS inlineado"} />
             <Resumen etiqueta="Envío" valor={momento === "ahora"
               ? "Inmediato"
               : `${fechaHora} (${zona})`} />

@@ -22,7 +22,7 @@ import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
   AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
-import { api, Campaign, CampaignMessage, MailConfig, Paged } from "@/lib/api";
+import { api, Campaign, CampaignMessage, MailConfig, Paged, Template } from "@/lib/api";
 import { EmptyState, StatusBadge, fecha, numero } from "@/components/shared";
 import { useAuth } from "@/lib/providers";
 
@@ -50,6 +50,13 @@ export default function CampanaDetallePage({ params }: { params: Promise<{ id: s
     queryKey: ["mail-config"],
     queryFn: () => api.get<MailConfig>("/api/v1/system/mail-config"),
     staleTime: 0, refetchOnMount: "always",
+  });
+
+  // Nombre de la plantilla de la que nació la campaña (solo si la tiene)
+  const { data: plantillas } = useQuery({
+    queryKey: ["plantillas"],
+    queryFn: () => api.get<Template[]>("/api/v1/templates"),
+    enabled: Boolean(c?.template_id),
   });
 
   const accion = useMutation({
@@ -241,6 +248,9 @@ export default function CampanaDetallePage({ params }: { params: Promise<{ id: s
             <Card>
               <CardHeader><CardTitle>Contenido</CardTitle></CardHeader>
               <CardContent className="text-sm space-y-2">
+                {c.template_id && (
+                  <Fila k="Plantilla" v={plantillas?.find((t) => t.id === c.template_id)?.name ?? "—"} />
+                )}
                 <Fila k="Formato" v={c.mode === "bloques" ? `Bloques (${c.blocks?.length ?? 0})` : "HTML fuente"} />
                 <Fila k="Texto plano" v={c.plain_text ? "Generado automáticamente" : "—"} />
                 <p className="text-xs text-muted-foreground pt-1">

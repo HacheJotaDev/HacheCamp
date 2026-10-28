@@ -110,7 +110,45 @@ def import_queue_count() -> int:
 
 # --------------------------------------------------------------------------- #
 # Control de velocidad (bucket con intervalo mínimo entre envíos)
+#
+# El límite es GLOBAL y compartido: la referencia vive en Redis
+# (hj:q:last_send_ns), así que N réplicas del worker (docker compose
+# --scale worker=N) respetan en conjunto la velocidad autorizada por SES.
+# La toma de slot es atómica vía Lua: evita la carrera del antiguo
+# WATCH/MULTI, que ante WatchError dejaba pasar envíos sin slot.
 # --------------------------------------------------------------------------- #
+
+# Toma un slot de forma atómica. ARGV: [now_ns, intervalo_ns].
+# Devuelve los segundos de espera como cadena ("0" si el slot es nuestro).
+_SLOT_LUA = """
+local last = tonumber(redis.call('GET', KEYS[1]) or '0')
+local now = tonumber(ARGV[1])
+local interval = tonumber(ARGV[2])
+if last > now then
+  -- Reloj retrocedido: reiniciamos la referencia para no bloquear
+  redis.call('SET', KEYS[1], ARGV[1])
+  return '0'
+end
+local next_allowed = last + interval
+if now < next_allowed then
+  return tostring((next_allowed - now) / 1e9)
+end
+redis.call('SET', KEYS[1], ARGV[1])
+return '0'
+"""
+
+
+def _tomar_slot(r: Any, intervalo_ns: int) -> float:
+    """Intento atómico de tomar slot. Devuelve segundos a esperar (0 = logrado).
+
+    Se usa EVAL directo (no register_script/EVALSHA) para compatibilidad con
+    cualquier Redis, incluido fakeredis en pruebas. A 5-14 envíos/s el coste
+    de reenviar el script es trivial.
+    """
+    resultado = r.eval(_SLOT_LUA, 1, LAST_SEND_KEY, time.time_ns(), intervalo_ns)
+    if isinstance(resultado, (bytes, bytearray)):
+        resultado = resultado.decode()
+    return float(resultado or 0)
 
 
 def wait_for_rate_slot(rate_per_second: float) -> float:
@@ -118,23 +156,14 @@ def wait_for_rate_slot(rate_per_second: float) -> float:
     if rate_per_second <= 0:
         return 0.0
     min_interval = 1.0 / rate_per_second
-    r = get_redis()
-    while True:
-        now = time.time_ns()
-        with r.pipeline() as pipe:
-            try:
-                pipe.watch(LAST_SEND_KEY)
-                last = int(pipe.get(LAST_SEND_KEY) or 0)
-                next_allowed = last + int(min_interval * 1e9)
-                if now < next_allowed:
-                    sleep_s = (next_allowed - now) / 1e9
-                    pipe.unwatch()
-                    time.sleep(min(sleep_s, 0.5))
-                    continue
-                pipe.multi()
-                pipe.set(LAST_SEND_KEY, now)
-                pipe.execute()
+    try:
+        r = get_redis()
+        while True:
+            espera = _tomar_slot(r, int(min_interval * 1e9))
+            if espera <= 0:
                 return 0.0
-            except Exception:
-                time.sleep(min_interval)
-                return 0.0
+            time.sleep(min(espera, 0.5))
+    except Exception:
+        # Redis caído: degradamos con pausa mínima en lugar de tumbar el envío
+        time.sleep(min_interval)
+        return 0.0
