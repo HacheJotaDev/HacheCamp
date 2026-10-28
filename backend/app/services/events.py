@@ -14,6 +14,7 @@ from datetime import datetime
 from typing import Any, Dict, Optional, Tuple
 from urllib.parse import urlparse
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -21,6 +22,7 @@ from app.core.db import utcnow
 from app.core.logging_conf import get_logger
 from app.models import Campaign, CampaignMessage, Contact, SesEvent
 from app.services import contacts as contact_service
+from app.services import queue as send_queue
 
 logger = get_logger("hj.events")
 
@@ -147,7 +149,13 @@ def record_event(
     url: Optional[str] = None,
     occurred_at: Optional[datetime] = None,
 ) -> Tuple[SesEvent, bool]:
-    """Registra un evento de forma idempotente. Devuelve (evento, nuevo)."""
+    """Registra un evento de forma idempotente. Devuelve (evento, nuevo).
+
+    Carrera webhook HTTP ↔ consumidor SQS (mismo evento por dos canales):
+    si la inserción choca con la UNIQUE de event_uid se cuenta como DUPLICADO
+    (el evento ya quedó registrado por el otro escritor); antes era un error
+    con rollback y reenvío de la cola.
+    """
     existing = db.query(SesEvent).filter(SesEvent.event_uid == event_uid).first()
     if existing:
         return existing, False
@@ -163,6 +171,12 @@ def record_event(
         occurred_at=occurred_at or utcnow(),
     )
     db.add(event)
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        existing = db.query(SesEvent).filter(SesEvent.event_uid == event_uid).first()
+        return existing, False
     return event, True
 
 
@@ -224,6 +238,20 @@ def process_ses_notification(db: Session, ses_event: Dict[str, Any]) -> Dict[str
                                                       detail={"tipo": bounce_subtype})
             else:
                 cm.status = "rebote_temporal"
+                # Reintento automático con tope: un rebote temporal (buzón
+                # lleno, graylisting) suele resolverse. Sin reencolado el
+                # mensaje quedaba varado en 'rebote_temporal' y la campaña
+                # terminaba 'completada' con pendientes eternos. El tope es
+                # RETRY_MAX_ATTEMPTS; el worker reintenta solo estados
+                # válidos y el claim atómico evita dobles envíos.
+                if (cm.attempts or 0) < settings.RETRY_MAX_ATTEMPTS:
+                    try:
+                        send_queue.schedule_retry(cm.id, max(cm.attempts or 1, 1))
+                        summary["reintento_rebote_programado"] = True
+                    except Exception:
+                        # Redis caído: move_due_retries/recuperación no aplican
+                        # a este estado; quedará para reconciliación manual.
+                        summary["reintento_rebote_programado"] = False
             cm.last_error = f"rebote {bounce_type}/{bounce_subtype}"
             record_event(db, type="bounce", event_uid=bounced_uid,
                          campaign_id=cm.campaign_id, message_id=cm.id,
@@ -273,6 +301,44 @@ def process_ses_notification(db: Session, ses_event: Dict[str, Any]) -> Dict[str
                      campaign_id=campaign_id, ses_message_id=ses_message_id, email=destination)
         summary["procesado"] = True
 
+    elif event_type == "delivery_delay":
+        # Retraso en la entrega (buzón lento, greylisting del destinatario):
+        # NO es entrega ni error. NO cambia el estado del mensaje: el evento
+        # DELIVERY definitivo llegará después. Antes caía en la rama genérica
+        # con uid ambiguo y sin semántica propia.
+        delay_info = ses_event.get("deliveryDelay", {})
+        cm = _find_by_ses_message_id(db, ses_message_id)
+        record_event(
+            db, type="delivery_delay",
+            event_uid=f"ses:{ses_message_id}:delivery_delay:{delay_info.get('timestamp', '')}",
+            campaign_id=cm.campaign_id if cm else campaign_id,
+            message_id=cm.id if cm else None,
+            ses_message_id=ses_message_id,
+            email=cm.email if cm else destination,
+            payload={"tipo_retraso": delay_info.get("delayType", "")},
+        )
+        summary["procesado"] = True
+
+    elif event_type == "rendering_failure":
+        # SES no pudo renderizar la plantilla: el mensaje NO salió. Estado
+        # error con motivo explícito (antes: rama genérica, estado ambiguo).
+        rf = ses_event.get("renderingFailure", {})
+        cm = _find_by_ses_message_id(db, ses_message_id)
+        if cm:
+            cm.status = "error"
+            cm.last_error = f"rendering_failure: {str(rf.get('errorMessage', ''))[:180]}"
+        record_event(
+            db, type="rendering_failure",
+            event_uid=f"ses:{ses_message_id}:rendering_failure",
+            campaign_id=cm.campaign_id if cm else campaign_id,
+            message_id=cm.id if cm else None,
+            ses_message_id=ses_message_id,
+            email=cm.email if cm else destination,
+            payload={"tipo": rf.get("failureType", ""),
+                     "detalle": str(rf.get("errorMessage", ""))[:200]},
+        )
+        summary["procesado"] = True
+
     else:
         record_event(db, type=event_type or "desconocido",
                      event_uid=f"ses:{ses_message_id}:{event_type}",
@@ -295,13 +361,19 @@ def record_open(db: Session, campaign_id: str, message_id: str) -> bool:
 
 
 def record_click(db: Session, campaign_id: str, message_id: str, url: str) -> bool:
-    """Registra clic. Cada clic se registra (comportamiento estándar)."""
+    """Registra clic. Cada clic se registra (comportamiento estándar).
+
+    El uid incorpora el instante exacto (ns): antes era fijo por URL, de modo
+    que clics repetidos al mismo enlace se descartaban por la unicidad de
+    event_uid y las métricas de clics quedaban infra-contadas.
+    """
     cm = db.get(CampaignMessage, message_id)
     if not cm or cm.campaign_id != campaign_id:
         return False
     import hashlib
+    import time
     digest = hashlib.sha256(f"{url}".encode()).hexdigest()[:12]
-    uid = f"click:{message_id}:{digest}"
+    uid = f"click:{message_id}:{digest}:{time.time_ns()}"
     record_event(db, type="click", event_uid=uid, campaign_id=campaign_id,
                  message_id=message_id, email=cm.email, url=url[:2000])
     return True

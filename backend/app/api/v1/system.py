@@ -304,10 +304,24 @@ def ses_diagnostico(db: Session = Depends(get_db)):
         .filter(SesEvent.type == "sqs_descartado")
         .order_by(SesEvent.occurred_at.desc()).limit(50).all()
     )
+    # Eventos sin vincular a mensaje: el pipeline recibe eventos (send,
+    # delivery, bounce...) pero NO se correlacionan con ningún
+    # campaign_message. Si este contador crece con entregas en 0, el
+    # configuration set emite eventos SIN las etiquetas de correlación
+    # (o los envíos provienen de otra fuente): la investigación
+    # 50.632-aceptados/6-entregados se decide con este dato + descartes.
+    sin_vincular = (
+        db.query(func.count(SesEvent.id))
+        .filter(SesEvent.message_id.is_(None),
+                SesEvent.ses_message_id.isnot(None),
+                SesEvent.type.in_(("send", "delivery", "bounce", "complaint", "reject")))
+        .scalar()
+    )
     eventos = {
         "por_tipo_24h": _por_tipo(ahora - timedelta(hours=24)),
         "por_tipo_7d": _por_tipo(ahora - timedelta(days=7)),
         "ultimo_evento": ultimo.occurred_at.isoformat() if ultimo else None,
+        "sin_vincular_a_mensaje": int(sin_vincular or 0),
         "descartes_recientes": [
             {"motivo": (d.payload or {}).get("motivo"),
              "lecturas": (d.payload or {}).get("lecturas"),
