@@ -235,7 +235,7 @@ def recover_orphaned_messages(db, *, min_age_seconds: Optional[int] = None,
         db.query(CampaignMessage.id)
         .join(Campaign, Campaign.id == CampaignMessage.campaign_id)
         .filter(CampaignMessage.status == "pendiente",
-                Campaign.status.in_("en_cola", "enviando"),
+                Campaign.status.in_(("en_cola", "enviando")),
                 CampaignMessage.updated_at < limite)
         .limit(limit)
         .all()

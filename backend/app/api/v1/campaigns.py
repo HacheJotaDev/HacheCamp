@@ -643,6 +643,8 @@ def campaign_test_send(campaign_id: str, payload: Dict[str, Any], request: Reque
             from_email=cfg["from_email"], from_name=cfg["from_name"],
             reply_to=campaign.reply_to,
         )
+    except send_queue.RateLimiterUnavailable as exc:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc))
     except ses_service.SESNotConfigured as exc:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc))
     except ses_service.SESError as exc:

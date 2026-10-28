@@ -306,6 +306,8 @@ def send_test(payload: SendTestRequest, request: Request,
             from_email=from_email, from_name=from_name,
             reply_to=payload.reply_to,
         )
+    except send_queue.RateLimiterUnavailable as exc:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc))
     except ses_service.SESNotConfigured as exc:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc))
     except ses_service.SESError as exc:

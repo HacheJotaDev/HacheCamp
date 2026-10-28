@@ -87,6 +87,13 @@ class FakeSES:
             exc = Exception("InternalServerError")
             exc.response = {"Error": {"Code": "InternalServerError"}}
             raise exc
+        if self.behavior == "quota":
+            # Cuota diaria agotada (forma real de SES v2: MessageRejected con
+            # mensaje 'Daily message quota exceeded')
+            exc = Exception("Daily message quota exceeded")
+            exc.response = {"Error": {"Code": "MessageRejected",
+                                      "Message": "Daily message quota exceeded"}}
+            raise exc
         self.sent.append(kwargs)
         return {"MessageId": f"ses-{_uuid.uuid4().hex[:16]}"}
 

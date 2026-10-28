@@ -252,6 +252,9 @@ def process_ses_notification(db: Session, ses_event: Dict[str, Any]) -> Dict[str
                         # Redis caído: move_due_retries/recuperación no aplican
                         # a este estado; quedará para reconciliación manual.
                         summary["reintento_rebote_programado"] = False
+                else:
+                    # Tope de intentos alcanzado: sin más reintentos
+                    summary["reintento_rebote_programado"] = False
             cm.last_error = f"rebote {bounce_type}/{bounce_subtype}"
             record_event(db, type="bounce", event_uid=bounced_uid,
                          campaign_id=cm.campaign_id, message_id=cm.id,
@@ -301,7 +304,8 @@ def process_ses_notification(db: Session, ses_event: Dict[str, Any]) -> Dict[str
                      campaign_id=campaign_id, ses_message_id=ses_message_id, email=destination)
         summary["procesado"] = True
 
-    elif event_type == "delivery_delay":
+    elif event_type in ("delivery_delay", "deliverydelay"):
+        # SES envía "DeliveryDelay" (CamelCase): normalizamos ambas formas.
         # Retraso en la entrega (buzón lento, greylisting del destinatario):
         # NO es entrega ni error. NO cambia el estado del mensaje: el evento
         # DELIVERY definitivo llegará después. Antes caía en la rama genérica
@@ -319,9 +323,10 @@ def process_ses_notification(db: Session, ses_event: Dict[str, Any]) -> Dict[str
         )
         summary["procesado"] = True
 
-    elif event_type == "rendering_failure":
-        # SES no pudo renderizar la plantilla: el mensaje NO salió. Estado
-        # error con motivo explícito (antes: rama genérica, estado ambiguo).
+    elif event_type in ("rendering_failure", "renderingfailure"):
+        # SES envía "RenderingFailure" (CamelCase). SES no pudo renderizar la
+        # plantilla: el mensaje NO salió. Estado error con motivo explícito
+        # (antes: rama genérica, estado ambiguo).
         rf = ses_event.get("renderingFailure", {})
         cm = _find_by_ses_message_id(db, ses_message_id)
         if cm:
