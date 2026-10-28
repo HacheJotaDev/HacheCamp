@@ -96,6 +96,7 @@ class Settings(BaseSettings):
     STALE_SENDING_MINUTES: int = 10          # 'enviando' antiguo -> estado incierto
     RATE_LIMIT_FAIL_CLOSED: bool = True      # Redis caído => NO enviar (nada sin slot)
     QUOTA_24H_MIN_REMAINING: int = 50        # Puerta de cuota 24 h: pausa al bajar de aquí
+    ORPHAN_MIN_AGE_SECONDS: int = 60         # Edad mínima para reencolar huérfanos
 
     # --- Cargas ---------------------------------------------------------------
     CSV_MAX_MB: int = 5

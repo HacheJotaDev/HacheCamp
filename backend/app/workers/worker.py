@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import signal
 import time
+from datetime import timedelta
 from typing import Any, Dict, Optional
 
 from app.core.config import settings
@@ -208,6 +209,42 @@ def process_one(db, mid: str) -> Dict[str, Any]:
     campaign_service.check_campaign_completion(db, campaign)
     db.commit()
     return {"accion": "enviado", "ses_message_id": ses_message_id}
+
+
+def recover_orphaned_messages(db, *, min_age_seconds: Optional[int] = None,
+                              limit: int = 10000) -> int:
+    """Reencola mensajes 'pendiente' que perdieron su lugar en la cola Redis.
+
+    Un crash del worker entre BRPOP y el envío deja el mensaje 'pendiente' en
+    PostgreSQL pero FUERA de la cola: nadie lo procesaría jamás. Cuando no hay
+    nada en cola ni en reintentos (nada en vuelo) y el mensaje supera la edad
+    mínima, se reencola; el claim atómico de process_one hace el proceso
+    idempotente (una copia extra en cola nunca duplica el envío).
+
+    'incierto' queda excluido a PROPÓSITO: ese estado requiere reconciliación
+    manual para no duplicar correos que SES ya pudo aceptar.
+    """
+    edad = settings.ORPHAN_MIN_AGE_SECONDS if min_age_seconds is None else min_age_seconds
+    try:
+        if send_queue.outbound_count() > 0 or send_queue.pending_retries_count() > 0:
+            return 0  # hay trabajo en vuelo: no tocar nada
+    except Exception:
+        return 0  # Redis caído: la recuperación no puede comprobar el estado
+    limite = utcnow() - timedelta(seconds=max(edad, 0))
+    ids = (
+        db.query(CampaignMessage.id)
+        .join(Campaign, Campaign.id == CampaignMessage.campaign_id)
+        .filter(CampaignMessage.status == "pendiente",
+                Campaign.status.in_("en_cola", "enviando"),
+                CampaignMessage.updated_at < limite)
+        .limit(limit)
+        .all()
+    )
+    mids = [r[0] for r in ids]
+    if mids:
+        send_queue.enqueue_messages(mids)
+        logger.warning("Mensajes huérfanos reencolados", extra={"cantidad": len(mids)})
+    return len(mids)
 
 
 def reconcile_stale_sends(db) -> int:

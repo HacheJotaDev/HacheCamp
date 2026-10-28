@@ -21,7 +21,8 @@ from app.models import (
     contact_lists_rel,
 )
 from app.services import queue as send_queue
-from app.services.contacts import can_send_promotional, normalize_email
+from app.services import contacts as contact_service
+from app.services.contacts import normalize_email
 from app.services.renderer import html_to_plain_text, wrap_plain_with_unsubscribe
 
 logger = get_logger("hj.campaigns")
@@ -60,7 +61,11 @@ def add_history(campaign: Campaign, action: str, *, user_id: Optional[str] = Non
 
 def select_recipients(db: Session, campaign: Campaign) -> List[Contact]:
     """Selecciona destinatarios según lista o segmento, con consentimiento válido
-    para campañas promocionales y sin supresión."""
+    para campañas promocionales y sin supresión.
+
+    La supresión se resuelve en UNA consulta (set de correos suprimidos) y no
+    con una consulta por contacto: con 50k destinatarios eran 50k+ SELECT.
+    """
     query = db.query(Contact).filter(Contact.status == "suscripto")
 
     if campaign.list_id:
@@ -97,7 +102,8 @@ def select_recipients(db: Session, campaign: Campaign) -> List[Contact]:
     recipients = query.all()
     # Filtro de supresión y consentimiento para campañas promocionales
     if campaign.category == "promocional":
-        recipients = [c for c in recipients if can_send_promotional(db, c)[0]]
+        suprimidos = contact_service.emails_suprimidos(db, [c.email for c in recipients])
+        recipients = [c for c in recipients if c.email not in suprimidos]
     else:
         recipients = [c for c in recipients if c.status == "suscripto"]
     return recipients
@@ -108,6 +114,11 @@ def enqueue_campaign(db: Session, campaign: Campaign) -> Dict[str, Any]:
 
     No inicia envíos automáticamente al desplegar: solo se invoca desde
     acciones explícitas (enviar ahora / programación vencida aprobada).
+
+    Escalado a 50k+: existencia comprobada por TROZOS de 1000 (una consulta
+    IN por trozo en vez de una por contacto) e inserción masiva
+    (insertmanyvalues) con fallback fila a fila si un trozo choca con una
+    carrera externa.
     """
     if campaign.status not in ("borrador", "en_revision", "programada", "pausada", "en_cola"):
         raise CampaignError(f"No se puede encolar una campaña en estado {campaign.status}")
@@ -124,21 +135,51 @@ def enqueue_campaign(db: Session, campaign: Campaign) -> Dict[str, Any]:
 
     message_ids: List[str] = []
     existing = 0
-    for contact in recipients:
-        email = normalize_email(contact.email)
-        exists = db.query(CampaignMessage.id).filter_by(
-            campaign_id=campaign.id, contact_id=contact.id
-        ).first()
-        if exists:
-            existing += 1
+    TROZO = 1000
+    for i in range(0, len(recipients), TROZO):
+        trozo = recipients[i:i + TROZO]
+        ids_contacto = [c.id for c in trozo]
+        # 1 consulta por trozo (antes: 1 por contacto)
+        pares_existentes = {
+            (cid, email)
+            for cid, email in db.query(CampaignMessage.contact_id, CampaignMessage.email)
+            .filter(CampaignMessage.campaign_id == campaign.id,
+                    CampaignMessage.contact_id.in_(ids_contacto))
+            .all()
+        }
+        nuevos: List[CampaignMessage] = []
+        for contact in trozo:
+            email = normalize_email(contact.email)
+            if (contact.id, email) in pares_existentes:
+                existing += 1
+                continue
+            nuevos.append(CampaignMessage(
+                campaign_id=campaign.id, contact_id=contact.id, email=email,
+                status="pendiente",
+            ))
+        if not nuevos:
             continue
-        msg = CampaignMessage(
-            campaign_id=campaign.id, contact_id=contact.id, email=email,
-            status="pendiente",
-        )
-        db.add(msg)
-        db.flush()
-        message_ids.append(msg.id)
+        try:
+            db.add_all(nuevos)
+            db.flush()  # insertmanyvalues: un INSERT por trozo cuando el driver lo soporta
+        except Exception:
+            # Carrera externa (duplicado insertado a la vez): fallback fila a
+            # fila; un contacto problemático no tira el trozo.
+            db.rollback()
+            for msg in nuevos:
+                try:
+                    dup = db.query(CampaignMessage.id).filter_by(
+                        campaign_id=campaign.id, contact_id=msg.contact_id).first()
+                    if dup:
+                        existing += 1
+                        continue
+                    db.add(msg)
+                    db.flush()
+                except Exception:
+                    db.rollback()
+                    existing += 1
+                    continue
+        message_ids.extend(m.id for m in nuevos if m.id)
 
     if campaign.status in ("borrador", "en_revision", "programada", "pausada"):
         transition(campaign, "en_cola")

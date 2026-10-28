@@ -44,6 +44,21 @@ def is_suppressed(db: Session, email: str) -> bool:
     return db.query(Suppression).filter(Suppression.email == normalize_email(email)).first() is not None
 
 
+def emails_suprimidos(db: Session, emails: List[str]) -> set:
+    """Correos (normalizados) presentes en la lista de supresión.
+
+    UNA consulta para N correos: encolar 50k destinatarios hacía 1 SELECT por
+    contacto (50k consultas solo de supresión); ahora es 1 consulta por trozo.
+    """
+    limpios = [normalize_email(e) for e in emails if e]
+    if not limpios:
+        return set()
+    return {
+        row[0]
+        for row in db.query(Suppression.email).filter(Suppression.email.in_(limpios)).all()
+    }
+
+
 def can_send_promotional(db: Session, contact: Contact) -> Tuple[bool, str]:
     """Un envío promocional exige consentimiento válido y ausencia de supresión."""
     if contact.status != "suscripto":

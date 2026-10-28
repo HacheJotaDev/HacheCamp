@@ -17,7 +17,7 @@ from app.models import Campaign, CampaignMessage
 from app.services import campaigns as campaign_service
 from app.services import queue as send_queue
 from app.services import ses as ses_service
-from app.workers.worker import reconcile_stale_sends
+from app.workers.worker import recover_orphaned_messages, reconcile_stale_sends
 from app.workers import heartbeat
 
 logger = get_logger("hj.scheduler")
@@ -90,6 +90,15 @@ def run_forever(interval_seconds: int = 20) -> None:
                     last_reconcile = now
                     if stale:
                         logger.warning("Reconciliación: mensajes inciertos", extra={"cantidad": stale})
+                    # Recuperación de huérfanos: mensajes 'pendiente' que
+                    # perdieron su sitio en la cola (crash entre BRPOP y envío).
+                    # Solo actúa con cola+reintentos vacías; idempotente por el
+                    # claim atómico del worker.
+                    huerfanos = recover_orphaned_messages(db)
+                    db.commit()
+                    if huerfanos:
+                        logger.warning("Recuperación: huérfanos reencolados",
+                                       extra={"cantidad": huerfanos})
 
                 if now - last_quota > 600:  # cada 10 minutos
                     refresh_quota_cache()
