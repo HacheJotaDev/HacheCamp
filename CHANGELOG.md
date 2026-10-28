@@ -7,6 +7,55 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y 
 
 ### Corregido
 
+- **Auditoría V4 — envíos bajo control global (rate limiter fail-closed)**:
+  - El limitador de velocidad ya NO falla abierto: si Redis cae, el mensaje
+    se repone a `pendiente` y se reprograma (`RateLimiterUnavailable` +
+    `RATE_LIMIT_FAIL_CLOSED=true`). Antes cada worker enviaba sin slot global
+    (con 14 réplicas: hasta 14x la velocidad autorizada contra SES).
+  - **Claim atómico** del mensaje (UPDATE con guarda de estado): si el mismo
+    `mid` aparece dos veces en la cola (crash + reencolado, réplica escalada),
+    solo una reclamación gana: imposible el doble envío.
+  - **Puerta de cuota 24 h**: `cuota_24h_restante()` lee SOLO la caché Redis
+    (cero llamadas AWS por mensaje); si la cuota restante baja de
+    `QUOTA_24H_MIN_REMAINING` el mensaje se reencola en vez de recibir un
+    error definitivo. "Daily message quota exceeded" es reintento programable.
+  - `ses_configured()` cachea la sonda 60 s (antes: 1 `GetAccount` por envío).
+  - Los envíos de prueba (plantillas y campañas) pasan por el MISMO limiter
+    global; con Redis caído responden 503 y no envían.
+- **Auditoría V4 — campañas escalables y sin huérfanos**:
+  - `enqueue_campaign` por trozos de 1000 (1 consulta `IN` por trozo e
+    inserción masiva con fallback fila a fila): 50k destinatarios dejaban
+    ~100k consultas y una transacción larguísima.
+  - Supresión resuelta en UNA consulta (`emails_suprimidos`) en vez de una
+    por contacto; semántica idéntica.
+  - `recover_orphaned_messages` (scheduler, cada 5 min): mensajes `pendiente`
+    que perdieron su sitio en la cola Redis (crash entre BRPOP y envío) se
+    reencolan cuando cola y reintentos están vacías; `incierto` queda
+    excluido a propósito (reconciliación manual, evita duplicar aceptados).
+- **Auditoría V4 — eventos SES con semántica completa**:
+  - `DeliveryDelay` y `RenderingFailure` con ramas propias (antes caían en la
+    rama genérica: estados ambiguos). El retraso NO cambia el estado; el
+    fallo de render marca error con motivo explícito.
+  - Rebote temporal: reintento programado con tope `RETRY_MAX_ATTEMPTS`
+    (antes quedaba varado y la campaña terminaba con pendientes eternos).
+  - Carrera webhook↔SQS capturada por `event_uid`: se cuenta como DUPLICADO
+    en vez de error + rollback + reenvío de cola.
+  - Clics repetidos al mismo enlace: todos se registran (el uid fijo por URL
+    descartaba el 2º en adelante; métricas infra-contadas).
+  - `/system/ses/diagnostico`: contador `sin_vincular_a_mensaje` (pipeline
+    vivo sin correlación) para investigar "50.632 aceptados / 6 entregados".
+- **Auditoría V4 — importación blindada**:
+  - Lock Redis por trabajo (`SET NX EX 900 s` con token, renovación por
+    lote, liberación atómica por Lua): si se escala el import-worker, solo
+    UNO procesa; los demás omiten (antes: doble procesamiento y contadores
+    inflados).
+  - Recuperación PERIÓDICA (60 s, edad mínima 60 s) de trabajos estancados:
+    `pendiente` que nadie tomó y `procesando` sin lock vivo se reencolan;
+    los `procesando` con lock vigente no se tocan. Antes solo al arrancar.
+- Regresión V4: 31 pruebas nuevas (`test_auditoria_v4.py`) cubriendo todo lo
+  anterior, incluida la carga real de 50.656 contactos y la matriz de
+  concurrencia con 14 réplicas.
+
 - **Importación masiva de contactos asíncrona** (el CSV de 50.656 correos
   bloqueaba el API, dejaba transacciones PostgreSQL "idle in transaction" y la
   base acababa con 0 contactos):
