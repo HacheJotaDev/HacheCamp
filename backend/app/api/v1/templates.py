@@ -21,6 +21,8 @@ from app.schemas import (
     TemplateVersionOut,
 )
 from app.services.mail_config import config_efectiva
+from app.services import queue as send_queue
+from app.services import ses as ses_service
 from app.services.renderer import (
     build_context,
     blocks_to_html,
@@ -296,6 +298,9 @@ def send_test(payload: SendTestRequest, request: Request,
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc))
 
     try:
+        # Prueba de envío bajo el MISMO límite global que la cola (sin slot no
+        # hay envío: una prueba no puede saltarse la velocidad autorizada).
+        send_queue.wait_for_rate_slot(ses_service.effective_rate_per_second())
         ses_id = ses_service.send_test_email(
             to_email=payload.to_email, subject=subject_render, html=html_final, text=plain,
             from_email=from_email, from_name=from_name,

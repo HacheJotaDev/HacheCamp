@@ -29,6 +29,7 @@ from app.schemas import (
 )
 from app.services import campaigns as campaign_service
 from app.services import mail_config
+from app.services import queue as send_queue
 from app.services import ses as ses_service
 from app.services.renderer import (
     html_to_plain_text,
@@ -634,6 +635,9 @@ def campaign_test_send(campaign_id: str, payload: Dict[str, Any], request: Reque
             mode=campaign.mode, blocks=campaign.blocks, html_source=campaign.html,
             subject=cfg["subject"], context=context,
         )
+        # Prueba de envío bajo el MISMO límite global que la cola (sin slot no
+        # hay envío: una prueba no puede saltarse la velocidad autorizada).
+        send_queue.wait_for_rate_slot(ses_service.effective_rate_per_second())
         ses_id = ses_service.send_test_email(
             to_email=to_email, subject=subject, html=html_final, text=plain,
             from_email=cfg["from_email"], from_name=cfg["from_name"],

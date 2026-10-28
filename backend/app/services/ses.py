@@ -23,6 +23,8 @@ logger = get_logger("hj.ses")
 
 QUOTA_CACHE_KEY = "hj:ses:quota"
 QUOTA_CACHE_TTL = 600  # 10 minutos
+CONFIGURED_CACHE_KEY = "hj:ses:configured"
+CONFIGURED_CACHE_TTL = 60  # 60 s: evita 1 llamada AWS por envío
 
 # Errores de SES que justifican reintento (transitorios)
 RETRYABLE_ERRORS = {"ThrottlingException", "TooManyRequestsException", "LimitExceededException",
@@ -65,14 +67,36 @@ def _client():
 
 
 def ses_configured() -> bool:
-    """Indica si hay credenciales disponibles en la cadena de Boto3."""
+    """Indica si hay credenciales disponibles en la cadena de Boto3.
+
+    Con credenciales explícitas responde al instante. La sonda costosa
+    (GetAccount cuando no hay credenciales en el entorno) se cachea 60 s en
+    Redis: antes se hacía 1 llamada AWS por cada envío.
+    """
     if settings.AWS_ACCESS_KEY_ID and settings.AWS_SECRET_ACCESS_KEY:
         return True
     try:
-        _client().get_account()
-        return True
+        r = get_redis()
+        cached = r.get(CONFIGURED_CACHE_KEY)
+        if cached is not None:
+            if isinstance(cached, (bytes, bytearray)):
+                cached = cached.decode()
+            return cached == "1"
+        ok = False
+        try:
+            _client().get_account()
+            ok = True
+        except Exception:
+            ok = False
+        r.set(CONFIGURED_CACHE_KEY, "1" if ok else "0", ex=CONFIGURED_CACHE_TTL)
+        return ok
     except Exception:
-        return False
+        # Redis caído: comportamiento anterior (sondeo directo, sin caché)
+        try:
+            _client().get_account()
+            return True
+        except Exception:
+            return False
 
 
 # --------------------------------------------------------------------------- #
@@ -132,6 +156,29 @@ def effective_rate_per_second() -> float:
         except Exception:
             ses_limit = 14
     return max(0.1, min(float(configured), float(ses_limit)))
+
+
+def cuota_24h_restante() -> Optional[float]:
+    """Cuota diaria (24 h) restante según la CACHÉ de Redis; nunca consulta AWS.
+
+    La caché la rellena get_sending_quota (TTL 10 min) y el scheduler la
+    refresca cada 10 minutos, así que la puerta de cuota no añade ninguna
+    llamada por mensaje. Devuelve None si no hay datos en caché (la puerta
+    no bloquea; no confundimos falta de datos con cuota agotada).
+    """
+    try:
+        cached = get_redis().get(QUOTA_CACHE_KEY)
+    except Exception:
+        return None
+    if not cached:
+        return None
+    try:
+        data = json.loads(cached)
+        max24 = float(data.get("max_24h") or 0)
+        usados = float(data.get("sent_last_24h") or 0)
+        return max(0.0, max24 - usados)
+    except Exception:
+        return None
 
 
 # --------------------------------------------------------------------------- #
@@ -209,7 +256,14 @@ def send_raw_email(msg: EmailMessage) -> str:
     except Exception as exc:
         name = type(exc).__name__
         code = getattr(exc, "response", {}).get("Error", {}).get("Code", "") if hasattr(exc, "response") else ""
+        mensaje = str(getattr(exc, "response", {}).get("Error", {}).get("Message", "")) if hasattr(exc, "response") else ""
         detail_code = code or name
+        texto = f"{detail_code} {mensaje}".lower()
+        if "quota" in texto or "daily message quota" in texto:
+            # Cuota diaria agotada: transitorio por naturaleza (ventana 24 h
+            # rodante). Reintento programable; nunca error definitivo.
+            raise SESError("cuota_24h", f"Cuota diaria de SES agotada: {detail_code} {mensaje}"[:200],
+                           retryable=True)
         if detail_code in RETRYABLE_ERRORS or "Throttling" in detail_code:
             raise SESError("throttling", f"SES limitando envío: {detail_code}", retryable=True)
         if "MessageRejected" in detail_code or "MessageRejected" in name:

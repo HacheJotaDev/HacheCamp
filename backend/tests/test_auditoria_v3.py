@@ -237,15 +237,23 @@ def test_rate_limiter_respetado_por_hilos_concurrentes():
 
 
 def test_rate_limiter_redis_caido_no_bloquea_envios(monkeypatch):
-    """Si Redis cae, el envío continúa (degradación) sin reventar."""
+    """V4 fail-closed: si Redis cae, el limiter lanza RateLimiterUnavailable y
+    NINGÚN envío sale sin slot global (con 14 réplicas serían 14x la velocidad).
+    Con la política legada explícita (fail_closed=False) sigue degradando."""
     from app.services import queue as send_queue
 
     def _redis_muerto():
         raise ConnectionError("redis caído")
 
     monkeypatch.setattr(send_queue, "get_redis", _redis_muerto)
+
+    # Política por defecto (fail-closed): bloquea el envío con excepción clara
+    with pytest.raises(send_queue.RateLimiterUnavailable):
+        send_queue.wait_for_rate_slot(100.0)
+
+    # Política legada opcional (solo pruebas): degradación con pausa local
     t0 = time.monotonic()
-    espera = send_queue.wait_for_rate_slot(100.0)
+    espera = send_queue.wait_for_rate_slot(100.0, fail_closed=False)
     assert espera == 0.0
     assert time.monotonic() - t0 < 2.0
 

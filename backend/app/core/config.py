@@ -89,11 +89,13 @@ class Settings(BaseSettings):
     SNS_TOPIC_ARNS: str = ""  # Lista blanca opcional de tópicos (separada por comas)
 
     # --- Envío ---------------------------------------------------------------
-    SEND_RATE_PER_SECOND: float = 5.0        # Límite configurable de la cola
+    SEND_RATE_PER_SECOND: float = 5.0        # Límite configurable de la cola (GLOBAL)
     SEND_BATCH_SIZE: int = 100
     RETRY_BACKOFF_SECONDS: int = 60          # Base exponencial (60, 120, 240...)
     RETRY_MAX_ATTEMPTS: int = 4
     STALE_SENDING_MINUTES: int = 10          # 'enviando' antiguo -> estado incierto
+    RATE_LIMIT_FAIL_CLOSED: bool = True      # Redis caído => NO enviar (nada sin slot)
+    QUOTA_24H_MIN_REMAINING: int = 50        # Puerta de cuota 24 h: pausa al bajar de aquí
 
     # --- Cargas ---------------------------------------------------------------
     CSV_MAX_MB: int = 5

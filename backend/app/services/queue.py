@@ -151,11 +151,30 @@ def _tomar_slot(r: Any, intervalo_ns: int) -> float:
     return float(resultado or 0)
 
 
-def wait_for_rate_slot(rate_per_second: float) -> float:
-    """Bloquea hasta que toque el siguiente envío. Devuelve la espera (s)."""
+class RateLimiterUnavailable(RuntimeError):
+    """Redis no disponible con política fail-closed: NO se autoriza enviar.
+
+    Con N réplicas del worker, enviar sin el límite global significaría
+    hasta N × velocidad objetivo (p. ej. 14 × 12 = 168 msg/s contra SES).
+    La política por defecto (RATE_LIMIT_FAIL_CLOSED) bloquea el envío y
+    reprograma el mensaje; el limiter nunca falla abierto en producción.
+    """
+
+
+def wait_for_rate_slot(rate_per_second: float, *, fail_closed: Optional[bool] = None) -> float:
+    """Bloquea hasta que toque el siguiente envío. Devuelve la espera (s).
+
+    Política ante Redis caído:
+    - fail_closed=True (defecto, settings.RATE_LIMIT_FAIL_CLOSED): lanza
+      RateLimiterUnavailable; el llamador repone el mensaje a 'pendiente' y
+      lo reprograma. Ningún correo sale sin slot global.
+    - fail_closed=False (legado, solo pruebas): degrada con una pausa local.
+    """
     if rate_per_second <= 0:
         return 0.0
     min_interval = 1.0 / rate_per_second
+    if fail_closed is None:
+        fail_closed = settings.RATE_LIMIT_FAIL_CLOSED
     try:
         r = get_redis()
         while True:
@@ -163,7 +182,12 @@ def wait_for_rate_slot(rate_per_second: float) -> float:
             if espera <= 0:
                 return 0.0
             time.sleep(min(espera, 0.5))
-    except Exception:
-        # Redis caído: degradamos con pausa mínima en lugar de tumbar el envío
+    except RateLimiterUnavailable:
+        raise
+    except Exception as exc:
+        if fail_closed:
+            raise RateLimiterUnavailable(
+                f"Redis no disponible ({type(exc).__name__}): envío bloqueado"
+            ) from exc
         time.sleep(min_interval)
         return 0.0

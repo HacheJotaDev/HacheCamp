@@ -120,13 +120,47 @@ def process_one(db, mid: str) -> Dict[str, Any]:
         msg.last_error = "Contacto en lista de supresión"
         return {"accion": "cancelado", "motivo": "supresion"}
 
-    # Transición a enviando (persistente)
-    msg.status = "enviando"
-    msg.attempts += 1
-    db.commit()
+    # Puerta de cuota 24 h (solo lectura de caché: 0 llamadas AWS por mensaje).
+    # Si SES ya no acepta más hoy, reencolar con reintento corto; el mensaje NO
+    # se marca error (la cuota se restablece con la ventana rodante).
+    restante = ses_service.cuota_24h_restante()
+    if restante is not None and restante <= settings.QUOTA_24H_MIN_REMAINING:
+        delay = send_queue.schedule_retry(mid, 1)
+        return {"accion": "reencolado", "motivo": "cuota_24h_agotada",
+                "espera": delay, "restante": restante}
 
-    # Control de velocidad (respeta cuota SES)
-    send_queue.wait_for_rate_slot(ses_service.effective_rate_per_second())
+    # Claim atómico: UPDATE con guarda de estado. Si el mismo mid aparece dos
+    # veces en la cola (o dos réplicas lo sacan), solo UNA reclamación tiene
+    # éxito: el segundo worker lo omite en vez de enviar duplicado.
+    reclamado = (
+        db.query(CampaignMessage)
+        .filter(CampaignMessage.id == mid,
+                CampaignMessage.status.in_(("pendiente", "incierto", "rebote_temporal")))
+        .update({"status": "enviando", "attempts": CampaignMessage.attempts + 1},
+                synchronize_session=False)
+    )
+    db.commit()
+    if not reclamado:
+        return {"accion": "omitido", "motivo": "reclamado_por_otro_worker"}
+    msg = db.get(CampaignMessage, mid)
+    db.refresh(msg)
+
+    # Control de velocidad (respeta cuota SES; GLOBAL entre réplicas)
+    try:
+        send_queue.wait_for_rate_slot(ses_service.effective_rate_per_second())
+    except send_queue.RateLimiterUnavailable:
+        # Fail-closed: Redis sin servicio => nada sale sin autorización global.
+        # Se repone 'pendiente' con commit INMEDIATO (no depende de Redis). El
+        # reintento en cola es opcional; si Redis sigue caído, la recuperación
+        # de huérfanos del scheduler lo reencolará cuando vuelva.
+        msg.status = "pendiente"
+        msg.last_error = "rate_limiter_no_disponible"
+        db.commit()
+        try:
+            delay = send_queue.schedule_retry(msg.id, 1)
+        except Exception:
+            delay = settings.RETRY_BACKOFF_SECONDS
+        return {"accion": "reencolado", "motivo": "rate_limiter_no_disponible", "espera": delay}
 
     try:
         ses_message_id = _render_and_send(db, msg, campaign)
