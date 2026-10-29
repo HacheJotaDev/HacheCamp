@@ -26,7 +26,13 @@ from app.services import queue as send_queue
 
 logger = get_logger("hj.events")
 
-AMAZON_SUFFIXES = (".amazonaws.com", ".amazon.com")
+# Anfitrión ÚNICO del que pueden provenir certificados de firma y URLs de
+# suscripción de SNS. La validación por sufijo (".amazonaws.com") era demasiado
+# amplia: subdominios como <bucket>.s3.amazonaws.com son controlables por
+# terceros y habilitaban SSRF hacia recursos ajenos y certificados arbitrarios.
+# Los certificados reales de SNS se publican siempre en sns.<región>.amazonaws.com.
+def _sns_host_valido() -> str:
+    return f"sns.{settings.AWS_REGION}.amazonaws.com"
 
 # Caché de certificados de firma SNS (evita descargar el certificado en cada
 # notificación; necesario para volúmenes altos vía SQS).
@@ -44,13 +50,13 @@ class SNSSecurityError(ValueError):
 
 
 def _safe_fetch(url: str, max_bytes: int = 65536) -> bytes:
-    """Descarga solo desde hosts Amazon (protección SSRF)."""
+    """Descarga SOLO del host oficial de SNS de nuestra región (anti-SSRF)."""
     parsed = urlparse(url)
     if parsed.scheme != "https":
         raise SNSSecurityError("La URL del certificado debe ser HTTPS")
     host = (parsed.hostname or "").lower()
-    if not any(host.endswith(sfx) for sfx in AMAZON_SUFFIXES):
-        raise SNSSecurityError("La URL del certificado no pertenece a Amazon")
+    if host != _sns_host_valido():
+        raise SNSSecurityError("La URL del certificado no pertenece al SNS de la región configurada")
     req = urllib.request.Request(url, method="GET")
     with urllib.request.urlopen(req, timeout=10) as resp:  # nosec: hosts restringidos
         return resp.read(max_bytes)
@@ -70,12 +76,19 @@ def _certificado_firmante(url: str, max_age: float = _CERT_TTL_SEGUNDOS) -> byte
 
 
 def _canonical_string(sns: Dict[str, Any], keys: list) -> str:
+    """Cadena a firmar según la especificación oficial de SNS (SignatureVersion 1).
+
+    Cada campo se representa como su NOMBRE seguido de su VALOR, ambos
+    terminados en salto de línea (ver docs de AWS: "Verifying the signatures
+    of Amazon SNS messages"). La implementación anterior añadía solo los
+    valores: producía firmas que no correspondían al formato de AWS.
+    """
     parts = []
     for key in keys:
         value = sns.get(key, "")
         if isinstance(value, bool):
             value = "true" if value else "false"
-        parts.append(str(value))
+        parts.extend((key, str(value)))
     return "\n".join(parts) + "\n"
 
 
@@ -89,7 +102,13 @@ def verify_sns_signature(sns: Dict[str, Any]) -> None:
 
     msg_type = sns.get("Type", "Notification")
     if msg_type == "Notification":
-        keys = ["Message", "MessageId", "Timestamp", "TopicArn", "Type"]
+        # El Subject es OPCIONAL en las notificaciones: solo participa en la
+        # cadena canónica cuando está presente (y siempre entre MessageId y
+        # Timestamp, según la especificación de SNS).
+        keys = ["Message", "MessageId"]
+        if "Subject" in sns:
+            keys.append("Subject")
+        keys.extend(["Timestamp", "TopicArn", "Type"])
     elif msg_type == "SubscriptionConfirmation":
         keys = ["Message", "MessageId", "SubscribeURL", "Timestamp", "Token", "TopicArn", "Type"]
     elif msg_type == "UnsubscribeConfirmation":
@@ -106,9 +125,15 @@ def verify_sns_signature(sns: Dict[str, Any]) -> None:
     from cryptography.hazmat.primitives.asymmetric import padding
 
     try:
-        cert_der = _certificado_firmante(cert_url)
+        cert_bytes = _certificado_firmante(cert_url)
         from cryptography import x509
-        cert = x509.load_der_x509_certificate(cert_der)
+        # SNS publica el certificado en PEM; se acepta también DER por
+        # compatibilidad (antes solo DER: con certificados reales PEM la
+        # verificación fallaba siempre).
+        if cert_bytes.lstrip().startswith(b"-----BEGIN CERTIFICATE-----"):
+            cert = x509.load_pem_x509_certificate(cert_bytes)
+        else:
+            cert = x509.load_der_x509_certificate(cert_bytes)
         public_key = cert.public_key()
         public_key.verify(
             base64.b64decode(signature),
