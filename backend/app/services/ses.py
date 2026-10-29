@@ -23,8 +23,11 @@ logger = get_logger("hj.ses")
 
 QUOTA_CACHE_KEY = "hj:ses:quota"
 QUOTA_CACHE_TTL = 600  # 10 minutos
-CONFIGURED_CACHE_KEY = "hj:ses:configured"
-CONFIGURED_CACHE_TTL = 60  # 60 s: evita 1 llamada AWS por envío
+# Caché de proceso para la comprobación de credenciales (evita repetir la
+# lectura de la cadena de Boto3 —y el sondeo de IMDS cuando no hay archivo—
+# en cada mensaje con 14 workers).
+_CHAIN_CACHE_TTL = 60.0
+_CHAIN_CACHE: Dict[str, Tuple[bool, float]] = {"resultado": (False, 0.0)}
 
 # Errores de SES que justifican reintento (transitorios)
 RETRYABLE_ERRORS = {"ThrottlingException", "TooManyRequestsException", "LimitExceededException",
@@ -67,36 +70,39 @@ def _client():
 
 
 def ses_configured() -> bool:
-    """Indica si hay credenciales disponibles en la cadena de Boto3.
+    """Comprueba credenciales SIN consultar SES (0 llamadas AWS por mensaje).
 
-    Con credenciales explícitas responde al instante. La sonda costosa
-    (GetAccount cuando no hay credenciales en el entorno) se cachea 60 s en
-    Redis: antes se hacía 1 llamada AWS por cada envío.
+    Distinción deliberada entre niveles de verificación:
+    1. EXISTENCIA (esta función): credenciales explícitas en settings o
+       disponibles en la cadena estándar de Boto3 (archivo compartido,
+       perfil, variables de entorno, rol IAM).
+    2. VALIDEZ Y PERMISOS (al enviar): AccessDenied/credenciales caducadas
+       se clasifican como SESError no reintentable con detalle claro.
+    3. DISPONIBILIDAD Y CUOTA (get_sending_quota + puerta cuota_24h): la
+       caché Redis la refresca el scheduler cada 10 minutos.
+
+    Nunca fue responsabilidad de esta función demostrar que AWS permite
+    enviar: era una sonda GetAccount por mensaje (o por minuto cachada), y
+    con 14 workers solo añadía latencia y una dependencia extra de Redis.
+    Comportamiento: explícitas -> True al instante; cadena de Boto3 ->
+    exista o no, con caché de proceso de 60 s; error al inspeccionar la
+    cadena -> False (fail-closed en producción: send_raw_email aborta con
+    SESNotConfigured; en desarrollo se permite continuar para mocks).
     """
     if settings.AWS_ACCESS_KEY_ID and settings.AWS_SECRET_ACCESS_KEY:
         return True
     try:
-        r = get_redis()
-        cached = r.get(CONFIGURED_CACHE_KEY)
-        if cached is not None:
-            if isinstance(cached, (bytes, bytearray)):
-                cached = cached.decode()
-            return cached == "1"
-        ok = False
-        try:
-            _client().get_account()
-            ok = True
-        except Exception:
-            ok = False
-        r.set(CONFIGURED_CACHE_KEY, "1" if ok else "0", ex=CONFIGURED_CACHE_TTL)
-        return ok
-    except Exception:
-        # Redis caído: comportamiento anterior (sondeo directo, sin caché)
-        try:
-            _client().get_account()
-            return True
-        except Exception:
-            return False
+        import time
+        resultado, expira = _CHAIN_CACHE["resultado"]
+        if time.time() < expira:
+            return resultado
+        import boto3
+        ok = boto3.Session().get_credentials() is not None
+    except Exception as exc:
+        logger.warning("Error comprobando credenciales AWS: %s", type(exc).__name__)
+        return False
+    _CHAIN_CACHE["resultado"] = (ok, time.time() + _CHAIN_CACHE_TTL)
+    return ok
 
 
 # --------------------------------------------------------------------------- #
