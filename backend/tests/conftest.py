@@ -2,6 +2,9 @@
 
 - El backend se prueba de extremo a extremo con TestClient de FastAPI.
 - SES se simula con un monkeypatch (no se envían correos reales nunca).
+- Los valores de entorno son DEFAULTS: exportando DATABASE_URL/REDIS_URL se
+  puede ejecutar la MISMA suite contra PostgreSQL y Redis REALES (aislados),
+  p. ej. con binarios embebidos (pgserver/redislite) en el sandbox.
 """
 from __future__ import annotations
 
@@ -9,28 +12,30 @@ import os
 import sys
 from pathlib import Path
 
-# Configura el entorno ANTES de importar la app
-os.environ["ENV"] = "development"
-os.environ["DATABASE_URL"] = "sqlite:///./.test_hj.db"
-os.environ["REDIS_URL"] = "fakeredis:///"
-os.environ["LOG_JSON"] = "false"
-os.environ["COOKIE_SECURE"] = "false"  # TestClient usa http://
-os.environ["MFA_REQUIRED_FOR_ADMIN"] = "false"  # el flujo MFA se prueba aparte
-os.environ["PUBLIC_BASE_URL"] = "http://localhost:3000"
-os.environ["API_BASE_URL"] = "http://localhost:8000"
+# Configura el entorno ANTES de importar la app (sin pisar lo ya definido)
+os.environ.setdefault("ENV", "development")
+os.environ.setdefault("DATABASE_URL", "sqlite:///./.test_hj.db")
+os.environ.setdefault("REDIS_URL", "fakeredis:///")
+os.environ.setdefault("LOG_JSON", "false")
+os.environ.setdefault("COOKIE_SECURE", "false")  # TestClient usa http://
+os.environ.setdefault("MFA_REQUIRED_FOR_ADMIN", "false")  # el flujo MFA se prueba aparte
+os.environ.setdefault("PUBLIC_BASE_URL", "http://localhost:3000")
+os.environ.setdefault("API_BASE_URL", "http://localhost:8000")
+
+_ES_SQLITE = os.environ["DATABASE_URL"].startswith("sqlite")
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import pytest
-from fastapi.testclient import TestClient
+import pytest  # noqa: E402  (el sys.path de arriba debe ejecutarse primero)
+from fastapi.testclient import TestClient  # noqa: E402
 
-# Limpia la BD de pruebas si existe
+# Limpia la BD de pruebas si existe (solo aplica al motor SQLite de fichero)
 db_file = Path(".test_hj.db")
-if db_file.exists():
+if _ES_SQLITE and db_file.exists():
     db_file.unlink()
 
 from app.main import app  # noqa: E402
-from app.core.db import SessionLocal, engine, get_db  # noqa: E402
+from app.core.db import SessionLocal, engine  # noqa: E402
 from app.models import Base  # noqa: E402
 
 
@@ -39,7 +44,7 @@ def _create_schema():
     Base.metadata.create_all(bind=engine)
     yield
     Base.metadata.drop_all(bind=engine)
-    if db_file.exists():
+    if _ES_SQLITE and db_file.exists():
         db_file.unlink()
 
 
@@ -126,7 +131,7 @@ def _clean_queue():
     from app.workers.redis_client import get_redis
     r = get_redis()
     r.delete("hj:q:outbound", "hj:q:retry", "hj:q:last_send_ns", "hj:q:import",
-             "hj:ses:quota", "hj:ses:quota:last_good", "hj:ses:configured")
+             "hj:q:bulk", "hj:ses:quota", "hj:ses:quota:last_good", "hj:ses:configured")
 
 
 @pytest.fixture

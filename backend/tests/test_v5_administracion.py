@@ -8,8 +8,6 @@ from __future__ import annotations
 
 import uuid
 
-import pytest
-
 from app.core.db import SessionLocal
 from app.models import (
     Campaign,
@@ -18,7 +16,6 @@ from app.models import (
     Contact,
     ContactList,
     Suppression,
-    User,
     contact_lists_rel,
 )
 from app.services import bulk_ops
@@ -191,7 +188,7 @@ def test_listas_incluyen_conteo_y_busqueda(client, admin_auth):
     _crear_contacto(client, _email("l3"))
 
     listas = client.get("/api/v1/lists").json()
-    mia = next(l for l in listas if l["id"] == lista["id"])
+    mia = next(x for x in listas if x["id"] == lista["id"])
     assert mia["contactos"] == 2
 
     encontradas = client.get(f"/api/v1/lists?q={marca}").json()
@@ -225,7 +222,7 @@ def test_vaciar_lista_quita_asociaciones_y_conserva_contactos_globales(client, a
     finally:
         db.close()
     # La lista queda a cero
-    mia = next(l for l in client.get("/api/v1/lists").json() if l["id"] == lista["id"])
+    mia = next(x for x in client.get("/api/v1/lists").json() if x["id"] == lista["id"])
     assert mia["contactos"] == 0
 
 
@@ -241,9 +238,9 @@ def test_eliminar_lista_es_logica_y_se_restaura(client, admin_auth):
     r = client.delete(f"/api/v1/lists/{lista['id']}?confirmar=true")
     assert r.status_code == 200
     activas = client.get("/api/v1/lists").json()
-    assert all(l["id"] != lista["id"] for l in activas)
+    assert all(x["id"] != lista["id"] for x in activas)
     papelera = client.get("/api/v1/lists/papelera").json()
-    assert any(l["id"] == lista["id"] for l in papelera)
+    assert any(x["id"] == lista["id"] for x in papelera)
 
     # Contactos y asociaciones intactos (borrado lógico)
     db = SessionLocal()
@@ -255,8 +252,8 @@ def test_eliminar_lista_es_logica_y_se_restaura(client, admin_auth):
 
     r = client.post(f"/api/v1/lists/{lista['id']}/restore")
     assert r.status_code == 200
-    restaurada = next(l for l in client.get("/api/v1/lists").json()
-                      if l["id"] == lista["id"])
+    restaurada = next(x for x in client.get("/api/v1/lists").json()
+                      if x["id"] == lista["id"])
     assert restaurada["contactos"] == 1, "La restauración recupera la población"
 
 
@@ -340,7 +337,7 @@ def test_vaciar_todo_procesa_por_lotes_y_restaura(client, admin_auth):
     precisa por operación."""
     marca = uuid.uuid4().hex[:6]
     patron = f"mas{marca}"
-    ids = _sembrar_contactos(client, None, 1201, marca=marca)
+    _sembrar_contactos(client, None, 1201, marca=marca)
 
     # Un contacto con supresión y consentimiento: nada de eso debe perderse
     email_protegido = _email(f"prot{marca}")
