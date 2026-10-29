@@ -21,7 +21,8 @@ import time
 from app.core.config import settings
 from app.core.db import SessionLocal, utcnow
 from app.core.logging_conf import get_logger, setup_logging
-from app.models import ImportJob
+from app.models import BulkOperation, ImportJob
+from app.services import bulk_ops as bulk_service
 from app.services import import_jobs as import_service
 from app.services import queue as queues
 from app.workers import heartbeat
@@ -58,8 +59,38 @@ def _reencolar_si_cabe(db, jid: str) -> None:
         pass  # quedará 'procesando': recover_pending_jobs lo reencola al reiniciar
 
 
+def _procesar_operacion_masiva(oid: str) -> None:
+    """Procesa una operación masiva (V5) con recuperación ante fallos."""
+    db = SessionLocal()
+    try:
+        result = bulk_service.process_operation(db, oid)
+        logger.info("Operación masiva procesada",
+                    extra={"resultado": json.dumps(result)[:300]})
+    except Exception as exc:
+        db.rollback()
+        logger.error("Error procesando operación masiva", extra={
+            "operacion": oid, "error": type(exc).__name__})
+        # Reencolar con límite de intentos (misma política que importaciones)
+        op = db.get(BulkOperation, oid)
+        if op and op.status in ("pendiente", "procesando"):
+            if op.attempts >= 3:
+                op.status = "fallida"
+                op.last_error = f"error_recurrente_tras_{op.attempts}_intentos"
+                op.finished_at = utcnow()
+                db.commit()
+            else:
+                op.attempts = (op.attempts or 0) + 1
+                db.commit()
+                try:
+                    queues.enqueue_bulk_operation(oid)
+                except Exception:
+                    pass  # recover_pending_operations la reencolará
+    finally:
+        db.close()
+
+
 def run_forever(poll_interval: int = 5) -> None:
-    """Bucle principal del worker de importaciones."""
+    """Bucle principal del worker de importaciones (+ operaciones masivas V5)."""
     setup_logging()
     logger.info("Worker de importaciones iniciado")
     last_recovery = 0.0
@@ -78,6 +109,7 @@ def run_forever(poll_interval: int = 5) -> None:
                 db = SessionLocal()
                 try:
                     import_service.recover_pending_jobs(db)
+                    bulk_service.recover_pending_operations(db, min_age_seconds=5)
                 finally:
                     db.close()
                 run_forever._recovered = True  # type: ignore[attr-defined]
@@ -91,10 +123,18 @@ def run_forever(poll_interval: int = 5) -> None:
                 db = SessionLocal()
                 try:
                     import_service.recover_stuck_jobs(db)
+                    bulk_service.recover_pending_operations(db)
                 except Exception as exc:
                     logger.error("Recuperación periódica falló", extra={"error": type(exc).__name__})
                 finally:
                     db.close()
+
+            # Operaciones masivas (V5): sondeo NO bloqueante para no robarle
+            # el bloqueo a la cola de importaciones (se procesan en serie).
+            oid = queues.pop_bulk_operation(timeout_seconds=0)
+            if oid:
+                _procesar_operacion_masiva(oid)
+                continue
 
             jid = queues.pop_import_job(timeout_seconds=3)
             if not jid:

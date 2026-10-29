@@ -111,6 +111,12 @@ def upsert_contact(
     created = existing is None
     notice = ""
 
+    # V5: un contacto en la PAPELERA (borrado lógico) NO se reactiva con una
+    # importación antigua: se omite con aviso; su restauración es una acción
+    # administrativa explícita (papelera -> restaurar).
+    if not created and existing.deleted_at is not None:
+        return existing, False, "eliminado_omitido"
+
     if created:
         # Direcciones en la lista de supresión NUNCA se activan: entran como
         # dado_baja (mismo par estado+supresión que la baja manual). La
@@ -212,7 +218,12 @@ def unsuppress_email(db: Session, email: str) -> bool:
 
 
 def count_contacts(db: Session) -> Dict[str, int]:
-    rows = db.query(Contact.status, func.count(Contact.id)).group_by(Contact.status).all()
+    rows = (
+        db.query(Contact.status, func.count(Contact.id))
+        .filter(Contact.deleted_at.is_(None))
+        .group_by(Contact.status)
+        .all()
+    )
     counts = {status: 0 for status in VALID_STATUSES}
     for status, total in rows:
         counts[status] = total

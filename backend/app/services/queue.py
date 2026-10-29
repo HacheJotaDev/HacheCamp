@@ -84,6 +84,33 @@ def outbound_count() -> int:
 # --------------------------------------------------------------------------- #
 
 IMPORT_KEY = "hj:q:import"  # LIST -> trabajos listos: JSON {"jid": <import_job_id>}
+BULK_KEY = "hj:q:bulk"      # LIST -> operaciones masivas V5: JSON {"oid": <bulk_operation_id>}
+
+
+def enqueue_bulk_operation(op_id: str) -> None:
+    """Encola una operación masiva (V5) para el worker importador."""
+    get_redis().lpush(BULK_KEY, json.dumps({"oid": op_id}))
+
+
+def pop_bulk_operation(timeout_seconds: int = 0) -> Optional[str]:
+    """Saca una operación masiva de la cola. Con timeout=0 no bloquea (LPOP):
+    el worker importador sondea la cola masiva SIN robarle bloqueo a la de
+    importaciones; ambas comparten proceso pero no capacidad.
+    """
+    if timeout_seconds and timeout_seconds > 0:
+        result = get_redis().brpop(BULK_KEY, timeout=timeout_seconds)
+    else:
+        result = get_redis().lpop(BULK_KEY)
+        if result:
+            result = (None, result)  # misma forma que brpop
+    if not result:
+        return None
+    _, raw = result
+    try:
+        data = json.loads(raw)
+        return data.get("oid")
+    except Exception:
+        return None
 
 
 def enqueue_import_job(job_id: str) -> None:
