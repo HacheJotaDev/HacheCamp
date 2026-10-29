@@ -128,7 +128,7 @@ def _aws_error_code(exc: Exception) -> str:
     return type(exc).__name__
 
 
-def _clasificar_error_aws(exc: Exception) -> str:
+def _clasificar_error_aws(exc: Exception, operacion: str = "ses:GetAccount") -> str:
     """Mensaje claro para el panel según el tipo de fallo de AWS.
 
     Distingue permisos IAM (AccessDenied, credenciales inválidas/caducadas)
@@ -139,14 +139,14 @@ def _clasificar_error_aws(exc: Exception) -> str:
     if any(s in texto for s in ("accessdenied", "unauthorized", "forbidden",
                                  "invalidclienttokenid", "expiredtoken",
                                  "invalidsignature", "signaturedoesnotmatch")):
-        return ("Faltan permisos IAM o las credenciales no son válidas para "
-                "ses:GetAccount: revise docs/SES_PERMISOS.md")
+        return (f"Faltan permisos IAM o las credenciales no son válidas para "
+                f"{operacion}: revise docs/SES_PERMISOS.md")
     if any(s in texto for s in ("connect", "timeout", "endpointconnectionerror",
                                  "connectionerror", "connectionclosederror",
                                  "readtimeout", "proxyerror", "unavailable",
                                  "internalerror", "slowdown")):
         return "AWS no responde (error de red o disponibilidad)"
-    return f"Error consultando AWS: {_aws_error_code(exc)}"
+    return f"Error consultando AWS ({operacion}): {_aws_error_code(exc)}"
 
 
 def get_sending_quota(force_refresh: bool = False) -> Dict[str, Any]:
@@ -369,7 +369,12 @@ def send_test_email(*, to_email: str, subject: str, html: str, text: str,
 
 
 def list_verified_identities() -> Tuple[list, Optional[str]]:
-    """Identidades verificadas en SES (para diagnóstico)."""
+    """Identidades verificadas en SES (para diagnóstico).
+
+    V5: el error se CLASIFICA (permisos IAM vs. red vs. otro) en vez de
+    exponer el nombre crudo de la excepción: «ClientError» no le dice al
+    operador si debe revisar la política IAM o esperar a AWS.
+    """
     try:
         client = _client()
         resp = client.list_email_identities(PageSize=50)
@@ -379,4 +384,4 @@ def list_verified_identities() -> Tuple[list, Optional[str]]:
         ]
         return identities, None
     except Exception as exc:
-        return [], type(exc).__name__
+        return [], _clasificar_error_aws(exc, operacion="ses:ListEmailIdentities")

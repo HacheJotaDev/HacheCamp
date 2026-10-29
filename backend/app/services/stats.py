@@ -61,6 +61,12 @@ def metrics_summary(db: Session, campaign_id: Optional[str] = None) -> Dict[str,
     inciertos = m.get("incierto", 0)
     pendientes = m.get("pendiente", 0) + m.get("enviando", 0) + m.get("cancelado", 0)
 
+    # V5 (observado en producción 50.656/1.704): «aceptado» por SES SIN
+    # resultado definitivo aún puede dominar el volumen. En vuelo = mensajes
+    # aceptados cuyo desenlace sigue abierto (el rebote temporal puede
+    # convertir en entrega tras el reintento; NO es un resultado final).
+    en_vuelo = m.get("aceptado", 0) + rebotes_suaves
+
     # Resultado definitivo: el mensaje ya tiene resolución de entrega o fallo
     definitivos = entregado + rebotes_duros + errores + quejas + inciertos
     aperturas_unicas = _unicos_con_evento(db, "open", campaign_id)
@@ -89,6 +95,7 @@ def metrics_summary(db: Session, campaign_id: Optional[str] = None) -> Dict[str,
         "aceptados_ses": aceptados,
         "entregados": entregado,
         "pendientes": pendientes,
+        "en_vuelo": en_vuelo,
         "fallidos": errores,
         "rebotes": rebotes_duros,
         "rebotes_temporales": rebotes_suaves,
@@ -97,20 +104,30 @@ def metrics_summary(db: Session, campaign_id: Optional[str] = None) -> Dict[str,
         "retrasos": retrasos,
         "incierto": inciertos,
         "success_rate": _pct(entregado, definitivos),
+        # V5: progreso honesto sobre TODO lo aceptado (el 99,3 % de success
+        # rate con 1.704 entregas y 48.915 en vuelo era matemáticamente
+        # correcto pero engañoso sin este denominador completo).
+        "entrega_rate": _pct(entregado, aceptados),
         "bounce_rate": _pct(rebotes_duros + rebotes_suaves, aceptados),
         "open_rate": _pct(aperturas_unicas, entregado),
         "click_rate": _pct(clics_unicos, entregado),
         "aperturas_unicas": aperturas_unicas,
         "clics_unicos": clics_unicos,
         "denominadores": {
-            "success_rate": "entregados / (entregados + rebotes permanentes + errores + quejas + inciertos)",
+            "success_rate": "entregados / (entregados + rebotes permanentes + errores + quejas + inciertos) — SOLO resultados definitivos",
+            "entrega_rate": "entregados / aceptados por SES — progreso sobre todo el volumen",
             "bounce_rate": "(rebotes permanentes + temporales) / aceptados por SES",
             "open_rate": "destinatarios únicos con apertura / entregas confirmadas",
             "click_rate": "destinatarios únicos con clic / entregas confirmadas",
         },
         "notas": {
+            "success_rate": ("Tasa sobre resultados DEFINITIVOS: ignora los mensajes "
+                             "aceptados aún sin desenlace (en_vuelo). Para el progreso "
+                             "real de la campaña use entrega_rate."),
             "retrasos": ("Eventos DeliveryDelay de SES: el mensaje sigue en tránsito "
-                         "(no es entrega ni rebote); el resultado definitivo llega después."),
+                         "(no es entrega ni rebote); el resultado definitivo llega después. "
+                         "Un mismo mensaje puede retrasarse y luego entregarse: los "
+                         "retrasos NO se restan de entregados ni de en_vuelo."),
             "rechazados": ("Mensajes que SES rechazó al procesarlos, antes de aceptarlos "
                            "(cuenta como fallidos)."),
             "incierto": ("Envíos sin confirmación de SES (timeout en la API): requieren "
@@ -136,7 +153,10 @@ def deliverability_summary(db: Session) -> Dict[str, Any]:
     return {
         "aceptados_por_ses": m.get("aceptado", 0) + m.get("entregado", 0) + m.get("rebote_permanente", 0)
                              + m.get("rebote_temporal", 0) + m.get("queja", 0) + m.get("incierto", 0),
-        "entregado_servidor_receptor": m.get("entregado", 0) or eventos.get("delivery", 0),
+        # V5: antes «entregado OR eventos delivery» mezclaba denominadores
+        # (mensajes vs. eventos): se informan AMBOS por separado.
+        "entregado_servidor_receptor": m.get("entregado", 0),
+        "eventos_delivery": eventos.get("delivery", 0),
         "rebote_permanente": m.get("rebote_permanente", 0),
         "rebote_temporal": m.get("rebote_temporal", 0),
         "rechazados": eventos.get("reject", 0),
@@ -161,11 +181,21 @@ def deliverability_summary(db: Session) -> Dict[str, Any]:
 
 
 def dashboard_summary(db: Session) -> Dict[str, Any]:
-    """Resumen para el panel principal. Solo datos reales."""
-    total_campaigns = db.query(func.count(Campaign.id)).scalar() or 0
+    """Resumen para el panel principal. Solo datos reales.
+
+    V5: las campañas en la PAPELERA (borrado lógico) no se cuentan en los
+    totales de campañas; sus mensajes/eventos históricos siguen computando
+    en las métricas agregadas (no se destruye historia).
+    """
+    total_campaigns = (
+        db.query(func.count(Campaign.id))
+        .filter(Campaign.deleted_at.is_(None))
+        .scalar() or 0
+    )
     active_campaigns = (
         db.query(func.count(Campaign.id))
-        .filter(Campaign.status.in_(["en_cola", "enviando", "programada", "pausada"]))
+        .filter(Campaign.status.in_(["en_cola", "enviando", "programada", "pausada"]),
+                Campaign.deleted_at.is_(None))
         .scalar()
     ) or 0
 
@@ -180,6 +210,7 @@ def dashboard_summary(db: Session) -> Dict[str, Any]:
     delivered = message_counts.get("entregado", 0)
     bounces = message_counts.get("rebote_permanente", 0)
     soft_bounces = message_counts.get("rebote_temporal", 0)
+    en_vuelo = message_counts.get("aceptado", 0) + soft_bounces
 
     event_counts: Dict[str, int] = {}
     for etype, total in (
@@ -192,6 +223,7 @@ def dashboard_summary(db: Session) -> Dict[str, Any]:
         "campanas_activas": active_campaigns,
         "aceptados_ses": accepted,
         "entregas": delivered,
+        "en_vuelo": en_vuelo,
         "rebotes": bounces,
         "rebotes_temporales": soft_bounces,
         "quejas": message_counts.get("queja", 0) or event_counts.get("complaint", 0),
