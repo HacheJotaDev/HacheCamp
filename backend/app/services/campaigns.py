@@ -3,10 +3,9 @@ encolado idempotente, pausa/reanudación/cancelación.
 """
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
-from sqlalchemy import func, select
+from sqlalchemy import func, String
 from sqlalchemy.orm import Session
 
 from app.core.db import utcnow
@@ -98,17 +97,25 @@ def _recipients_query(db: Session, campaign: Campaign):
                     col = Contact.last_name
                 elif field.startswith("atributo:"):
                     key = field.split(":", 1)[1]
-                    # Filtrado por atributo JSON (aproximación por coincidencia de texto)
-                    query = query.filter(Contact.attributes.cast(func.text()).like(f'%"{key}"%'))
+                    # Filtrado por atributo JSON (aproximación por coincidencia
+                    # de texto). cast(String): cast(func.text()) rompía la
+                    # compilación SQL (bug latente sin descubrir: ninguna
+                    # prueba ejercitaba esta ruta hasta el cierre V5).
+                    query = query.filter(
+                        Contact.attributes.cast(String).like(f'%"{key}"%'))
                     continue
                 else:
                     continue
                 if op == "igual":
-                    query = query.filter(col == value)
+                    query = query.filter(func.lower(col) == value.lower())
                 elif op == "empieza":
-                    query = query.filter(col.like(f"{value}%"))
+                    # ilike: en PostgreSQL LIKE es case-sensitive y un segmento
+                    # «contiene GMAIL.COM» no coincidiría con correos en
+                    # minúsculas (en SQLite LIKE sí es insensible, por eso los
+                    # tests no lo detectaban). Hallazgo del cierre V5.
+                    query = query.filter(col.ilike(f"{value}%"))
                 else:  # contiene
-                    query = query.filter(col.like(f"%{value}%"))
+                    query = query.filter(col.ilike(f"%{value}%"))
 
     if campaign.category == "promocional":
         query = query.filter(
