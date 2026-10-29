@@ -125,7 +125,7 @@ Al terminar, el script imprime la URL de la cola. Añádela al `.env`:
 
 ```bash
 AWS_SQS_EVENTS_QUEUE_URL=https://sqs.us-east-2.amazonaws.com/TU_CUENTA/hj-campaigns-ses-events
-docker compose up -d worker    # reinicia el worker para que consuma
+docker compose up -d events-worker    # arranca el consumidor dedicado de eventos
 ```
 
 Detalles de seguridad:

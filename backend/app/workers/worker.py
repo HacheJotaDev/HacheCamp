@@ -6,6 +6,7 @@ Ejecución: python -m app.workers.worker
 from __future__ import annotations
 
 import json
+import os
 import signal
 import time
 from datetime import timedelta
@@ -266,12 +267,33 @@ def reconcile_stale_sends(db) -> int:
     return len(stale)
 
 
+def iniciar_consumidor_si_habilitado() -> Optional[Any]:
+    """Arranca el consumidor SQS integrado SOLO si se habilita explícitamente.
+
+    Por defecto (HJ_SQS_IN_SEND_WORKER ausente o "0") los workers de envío NO
+    consumen eventos: el responsable único del pipeline SES->SNS->SQS es el
+    servicio dedicado events-worker (docker-compose). Escalar a 14 workers ya
+    no multiplica consumidores SQS ni comparte un mismo latido 'sqs_consumer'
+    entre 14 procesos (el healthcheck no puede saber cuáles están vivos).
+
+    HJ_SQS_IN_SEND_WORKER=1 conserva el comportamiento antiguo para despliegues
+    sin el servicio dedicado. Si por error quedaran ambos activos, la
+    idempotencia por event_uid (events.record_event) evita duplicar eventos;
+    solo compiten por la cola, sin duplicidad de datos.
+    """
+    if os.getenv("HJ_SQS_IN_SEND_WORKER", "0") == "1":
+        return sqs_events.start_consumer()
+    logger.info("Consumidor SQS integrado deshabilitado (HJ_SQS_IN_SEND_WORKER=0); "
+                "los eventos los procesa el servicio events-worker")
+    return None
+
+
 def run_forever(poll_interval: int = 5) -> None:
     """Bucle principal del worker."""
     setup_logging()
     logger.info("Worker de envío iniciado", extra={"region": settings.AWS_REGION})
-    # Eventos de SES vía SQS (canal privado) en hilo independiente
-    sqs_events.start_consumer()
+    # Eventos de SES vía SQS: solo si el operador lo habilita en este proceso
+    iniciar_consumidor_si_habilitado()
     while _running:
         try:
             # Latido de actividad real (healthcheck de Docker): se registra al

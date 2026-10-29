@@ -7,13 +7,13 @@
 #                el .env define BIND_IP_FRONTEND=0.0.0.0)
 # PostgreSQL y Redis NO exponen puertos: solo red interna hj_campaigns_internal.
 #
-# Healthchecks: api usa HTTP (uvicorn); worker y scheduler son procesos de
-# segundo plano SIN servidor HTTP — usan heartbeat en Redis (actividad real,
-# ver app/workers/heartbeat.py), no una comprobación de proceso.
+# Healthchecks: api usa HTTP (uvicorn); worker, events-worker, import-worker y
+# scheduler son procesos de segundo plano SIN servidor HTTP — usan heartbeat en
+# Redis (actividad real, ver app/workers/heartbeat.py), no una comprobación de proceso.
 #
-# Credenciales de AWS (SES/SQS): los servicios api, worker y scheduler reciben
-# los archivos ~/.aws del VPS como secretos Docker (solo lectura, ver
-# scripts/deploy.sh → preparar_secretos_aws). Nunca van en el repositorio.
+# Credenciales de AWS (SES/SQS): los servicios api, worker, events-worker y
+# scheduler reciben los archivos ~/.aws del VPS como secretos Docker (solo
+# lectura, ver scripts/deploy.sh → preparar_secretos_aws). Nunca van en el repositorio.
 
 name: hj-campaigns
 
@@ -138,6 +138,10 @@ services:
           memory: 768m
 
   # ------------------------------------------------------------------ worker de envío
+  # Escalable con: docker compose up -d --scale worker=14
+  # Los workers de envío NO consumen la cola SQS de eventos salvo que
+  # HJ_SQS_IN_SEND_WORKER=1 esté definido en su entorno: el consumidor
+  # responsable del pipeline SES->SNS->SQS es el servicio events-worker.
   worker:
     <<: [*backend, *aws]
     command: ["python", "-m", "app.workers.worker"]
@@ -162,6 +166,38 @@ services:
       resources:
         limits:
           memory: 512m
+
+  # ------------------------------------------------------------------ events-worker (SQS)
+  # ÚNICO consumidor de la cola de eventos SES (entregas, rebotes, quejas):
+  #   SES (conjunto de configuración) -> SNS -> SQS -> events-worker
+  # Separado del worker de envío para que escalar a N workers no multiplique
+  # consumidores SQS ni enmascare caídas en el latido compartido. Si la cola
+  # no está configurada el servicio queda inactivo (latido 'inactivo'), sin
+  # reinicios en bucle. Idempotencia por event_uid: reinicios y solapes nunca
+  # duplican eventos.
+  events-worker:
+    <<: [*backend, *aws]
+    command: ["python", "-m", "app.workers.events_worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    # Healthcheck por latido real en Redis: el bucle de long polling late tras
+    # cada lote (hj:hb:sqs_consumer). Peor caso por ciclo ~60 s (poll 20 s +
+    # lectura 40 s) -> umbral 300 s seguro.
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.workers.heartbeat", "sqs_consumer", "--max-age", "300"]
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 256m
 
   # ------------------------------------------------------------------ worker de importaciones
   # Proceso SEPARADO del worker de envíos: una importación de 50k contactos

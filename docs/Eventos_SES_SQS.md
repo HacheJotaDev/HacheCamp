@@ -80,15 +80,16 @@ cd /opt/hj-campaigns
 echo "AWS_SQS_EVENTS_QUEUE_URL=$QUEUE_URL" >> .env   # o edítalo con nano
 # Permisos del usuario de envío (añade a la política de docs/SES_PERMISOS.md):
 #   sqs:ReceiveMessage, sqs:DeleteMessage  ->  Resource: $QUEUE_ARN
-docker compose up -d worker     # recrea solo el worker con la variable nueva
+docker compose up -d events-worker   # recrea solo el consumidor dedicado de eventos
 ```
 
 ## 4. Verificación del flujo completo (obligatoria antes de darlo por funcional)
 
 ```bash
-# 4a. El worker debe registrar el consumidor iniciado (NO el aviso de deshabilitado)
-docker compose logs --since 2m worker | grep -i sqs
-#   esperado: "Consumidor de eventos SES por SQS iniciado"
+# 4a. El events-worker debe registrar el consumidor iniciado (NO el aviso de deshabilitado)
+docker compose logs --since 2m events-worker | grep -i sqs
+#   esperado: "Events worker iniciado (consumidor dedicado SES/SQS)"
+#   y el healthcheck sano: docker compose ps events-worker  ->  (healthy)
 
 # 4b. Panel: eventos_sqs.habilitado debe ser true
 curl -s -b cookies.txt http://127.0.0.1:8086/api/v1/system/ses/status | \

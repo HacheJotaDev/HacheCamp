@@ -101,7 +101,7 @@ Siguientes pasos:
   3. Activa los eventos de SES por SQS (canal privado, sin endpoint público):
        docker compose exec -T api python scripts/setup_ses_events.py            # plan
        docker compose exec -T api python scripts/setup_ses_events.py --aplicar  # ejecuta
-     y añade AWS_SQS_EVENTS_QUEUE_URL=<cola> a .env; luego: docker compose up -d worker
+     y añade AWS_SQS_EVENTS_QUEUE_URL=<cola> a .env; luego: docker compose up -d events-worker
   4. Verifica SES y realiza UN envío de prueba autorizado:
        docker compose exec -T api python scripts/check_ses.py
 
