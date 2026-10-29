@@ -52,7 +52,7 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y 
   - Recuperación PERIÓDICA (60 s, edad mínima 60 s) de trabajos estancados:
     `pendiente` que nadie tomó y `procesando` sin lock vivo se reencolan;
     los `procesando` con lock vigente no se tocan. Antes solo al arrancar.
-- Regresión V4: 31 pruebas nuevas (`test_auditoria_v4.py`) cubriendo todo lo
+- Regresión V4: 30 pruebas nuevas (`test_auditoria_v4.py`) cubriendo todo lo
   anterior, incluida la carga real de 50.656 contactos y la matriz de
   concurrencia con 14 réplicas.
 
