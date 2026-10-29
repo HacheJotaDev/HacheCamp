@@ -68,6 +68,69 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y 
   listas con campañas sin materializar, permisos admin/operador, no
   reactivación por importación y coherencia worker-eliminación).
 
+### Cierre V5 (revisión pre-push): 4 bugs de producción corregidos + 15 pruebas nuevas
+
+- **Rate limiter roto con Redis REAL** (`services/queue.py`): el script Lua
+  tomaba la hora de cada CLIENTE antes del EVAL; un hilo desplanzado llegaba
+  con timestamp antiguo, disparaba la rama «reloj retrocedido» y concedía el
+  slot SIN esperar (fakeredis serializa en proceso y no reproducía la
+  ventana: 4 pruebas de concurrencia V4 fallaban solo contra redis-server
+  real). Ahora la hora se toma DENTRO del script (`redis.call('TIME')`), la
+  concesión es atómica respecto al SET y la espera se devuelve con
+  `tostring()` (Redis trunca a entero los números de Lua). Impacto: sin este
+  fix, N workers combinados podían superar la velocidad autorizada por SES.
+- **Cancelaciones del worker de envío se PERDÍAN** (`workers/worker.py`):
+  el bucle hacía `db.close()` sin commit; los retornos anticipados de
+  `process_one` (campaña cancelada, supresión) se descartaban con rollback
+  silencioso y el mensaje volvía a 'pendiente' (churn infinito de huérfanos).
+  Ahora el bucle confirma tras procesar.
+- **Guard de papelera en el worker** (`workers/worker.py`): un mensaje
+  PENDIENTE de un contacto pasado a la papelera NO sale (se cancela con
+  motivo `contacto_en_papelera`); lo ya aceptado/entregado/incierto jamás se
+  toca (nada aceptado por SES se anula ni se reenvía).
+- **Cancelación entre lotes invisible** (`services/bulk_ops.py`): la sesión
+  del worker usa `expire_on_commit=False` y `db2.get` devolvía la copia
+  cacheada sin ver el flag escrito por el API; la cancelación de una
+  operación EN CURSO nunca surtía efecto. Corregido con `db2.refresh(op)`
+  (mismo patrón que import_jobs). Además: cierre terminal SIEMPRE (una
+  cancelación llegaba durante el último lote dejaba la operación huérfana en
+  'procesando' para siempre) y defensa en profundidad para `eliminar_ids`
+  (procesa SOLO sus ids explícitos si algún día llegara al worker).
+- **Listas: colisión de nombres al restaurar** (`services/lists.py`,
+  `api/v1/lists.py`, frontend): renombrar una lista activa a un nombre que
+  está en la papelera provocaba IntegrityError 500 y bloqueaba la
+  restauración de la otra lista. Ahora `update_list` rechaza (409) nombres
+  reservados por papelera; `restore_list` gestiona colisión heredada/carrera
+  con 409 accionable o restauración RENOMBRADA (`{"nuevo_nombre": ...}`),
+  captura IntegrityError (nunca 500) y el panel ofrece el renombrado en un
+  diálogo. Bajo la restricción UNIQUE la colisión real es imposible (queda
+  como defensa en profundidad).
+- **Segmentos en PostgreSQL** (`services/campaigns.py`): las reglas usaban
+  `LIKE` (case-sensitive en PG; SQLite es insensible y los tests no lo
+  veían): «email contiene GMAIL.COM» no coincidía con correos en minúsculas.
+  Ahora `ilike`/lower. Bug latente adicional: las reglas `atributo:clave`
+  rompían la compilación SQL (`cast(func.text())` en vez de un tipo);
+  corregido con `cast(String)` y candado de comportamiento documentado.
+- **Prueba masiva 50.656 contactos sobre PostgreSQL 16 real + Redis real**
+  (script fuera de la suite): vaciado por lotes con memoria estable
+  (RSS máx ~126 MB), progreso persistido visible, API y login RESPONDIENDO
+  durante la operación (25/25 sondeos), cancelación entre lotes exacta
+  (12.000/50.656, sin omisiones ni duplicados), reanudación tras reinicio,
+  restauración integral (supresiones/consentimientos/mensajes/asociaciones
+  intactos) y purga física que omite contactos con mensajes.
+- **Suite completa contra motores reales**: 311 pruebas SQLite/fakeredis +
+  las mismas contra PostgreSQL 16 real y redis-server real (pgserver y
+  binario redis embebidos, sin Docker ni root: limitación del sandbox
+  documentada). Migración `c5d6e7f8a9b0` verificada up → downgrade -1 →
+  up sobre PostgreSQL real. TypeScript 0 errores; ESLint 0 errores (5
+  avisos preexistentes); lint backend sin errores nuevos vs. baseline y
+  `app/` limpia; build de producción OK.
+- **Docker Compose / migraciones (verificado, sin cambios)**: el servicio
+  one-shot `migrate` (`alembic upgrade head`) se ejecuta automáticamente en
+  `docker compose up -d` (api/worker/events-worker/import-worker/scheduler
+  dependen de `service_completed_successfully`); NO re-ejecuta con
+  `docker compose restart` (documentado en el informe de despliegue).
+
 ### Verificación funcional del panel (estadísticas reales y cuota SES)
 
 - **Retrasos de entrega visibles** (`services/stats.py`, `api/v1/stats.py`, frontend):
