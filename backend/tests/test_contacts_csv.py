@@ -89,12 +89,17 @@ def test_alta_manual_con_consentimiento(client, admin_auth):
 
 
 def test_baja_impide_reactivacion_por_import(client, admin_auth, importar_csv):
-    """Un contacto dado de baja NO se reactiva al reimportar el CSV."""
+    """Un contacto dado de baja NO se reactiva al reimportar el CSV.
+
+    V5: la baja con supresión es POST /contacts/{id}/baja (el DELETE ahora
+    lleva a la papelera); la protección de reactivación se mantiene igual.
+    """
     email = f"baja-{uuid.uuid4().hex[:6]}@test.local"
     resp = client.post("/api/v1/contacts", json={
         "email": email, "consent_source": "formulario_web"})
     cid = resp.json()["id"]
-    client.delete(f"/api/v1/contacts/{cid}")  # baja + supresión
+    r = client.post(f"/api/v1/contacts/{cid}/baja")  # baja + supresión (V4)
+    assert r.status_code == 200, r.text
 
     progreso = importar_csv(f"email\n{email}\n".encode(),
                             consent_source="formulario_web")

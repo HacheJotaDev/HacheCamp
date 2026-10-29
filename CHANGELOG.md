@@ -5,6 +5,69 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y 
 
 ## [Sin publicar]
 
+### V5 — Administración avanzada: papelera, operaciones masivas y estadísticas honestas
+
+- **Campañas: eliminar / archivar / restaurar / papelera** (`models.py`,
+  `services/campaigns.py`, `api/v1/campaigns.py`): borrado LÓGICO con
+  `deleted_at`/`deleted_by` (+ `archived_at` para archivo). Eliminar una
+  campaña activa la cancela primero (pendientes → cancelado; NADA aceptado o
+  incierto se reenvía ni se toca). Mensajes, eventos SES, historial y
+  estadísticas se conservan íntegros. Papelera con restauración (admin).
+- **Listas: papelera y vaciado seguro** (`services/lists.py`,
+  `api/v1/lists.py`): eliminar lista es lógico (restaurable); VACIAR elimina
+  solo las asociaciones contacto↔lista por lotes de 5.000 (los contactos
+  globales y sus otras listas quedan intactos). Conteo de contactos por
+  lista con una sola consulta GROUP BY (sin N+1) y búsqueda. Protección:
+  no se puede eliminar/vaciar una lista usada por campañas cuya población
+  aún no está materializada (borrador/en_revisión/programada).
+- **Contactos: papelera y operaciones masivas asíncronas**
+  (`services/bulk_ops.py`, `api/v1/contacts.py`, `workers/import_worker.py`):
+  - `DELETE /contacts/{id}` pasa a ser borrado lógico (papelera, admin);
+    la baja con supresión de V4 es ahora `POST /contacts/{id}/baja`.
+  - `bulk-delete` modo `eliminar` ya NO borra físicamente: papelera con
+    registro de operación (`bulk_operations`) para restaurar por lote.
+  - NUEVO `POST /contacts/bulk-delete-filtrado`: eliminación lógica de los
+    contactos filtrados, ASÍNCRONA (202 + progreso persistente).
+  - NUEVO `POST /contacts/vaciar-todo`: vaciado global de contactos activos,
+    solo admin, exige frase escrita exacta «VACIAR CONTACTOS», preview con
+    conteo exacto y dependencias (campañas activas/importaciones), lotes de
+    1.000 con commit corto, progreso y cancelación entre lotes.
+  - NUEVO `POST /contacts/purgar`: purga FÍSICA irreversible de contactos ya
+    en papelera, con frase «PURGAR CONTACTOS», antigüedad mínima y OMISIÓN de
+    cualquier contacto con mensajes de campaña (las estadísticas históricas
+    nunca se destruyen). Opción `suprimir` para bloquear reimportaciones.
+  - Papelera de contactos (`GET /contacts?papelera=true`) con restauración
+    individual, por lote o por operación (`deleted_by_operation`).
+  - `upsert_contact` NUNCA reactiva contactos en papelera (aviso
+    `eliminado_omitido`): los trabajos de importación antiguos no los tocan.
+  - El import-worker procesa también la cola `hj:q:bulk` (en serie, con lock
+    Redis y recuperación de operaciones estancadas al reiniciar).
+- **Estadísticas honestas** (`services/stats.py`, frontend): la métrica
+  «Success Rate» (99,3 % con 1.704 entregas y 48.915 en vuelo) era
+  matemáticamente correcta pero engañosa: su denominador son SOLO los
+  resultados definitivos. Se añade `entrega_rate` (entregados/aceptados),
+  `en_vuelo` (aceptados sin desenlace) y la nota explicativa de cada tasa;
+  el dashboard muestra ambas y las tarjetas «En vuelo» y «Pendientes».
+  `deliverability_summary` separa mensajes entregados de eventos delivery
+  (antes los mezclaba con `or`). Las campañas en papelera no se cuentan en
+  los totales del dashboard; sus métricas históricas siguen computando.
+- **Diagnóstico SES** (`services/ses.py`): el error de identidades se
+  CLASIFICA (permisos IAM vs. red vs. otro) en vez de exponer «ClientError»
+  crudo; `list_verified_identities` reutiliza la misma clasificación que la
+  cuota. La «última consulta AWS» refleja el `actualizado` del último dato
+  válido aunque AWS esté caído (con marca `desactualizado`).
+- **Migración `c5d6e7f8a9b0`** (ADITIVA, reversible; campos nuevos NULLABLE):
+  columnas de papelera en `campaigns`/`contact_lists`/`contacts` + tabla
+  `bulk_operations` con índices. Compatible con el despliegue progresivo.
+- **3 errores TypeScript preexistentes corregidos** eliminando andamio sin
+  uso (`calendar.tsx`, `resizable.tsx`, `lib/db.ts`; ninguno importado).
+  TypeScript 0 errores; ESLint 0 errores; build de producción OK.
+- **Pruebas: 296 aprobadas** (268 de V4 + 28 nuevas de administración:
+  papelera/restauración de campañas y listas, vaciado global por lotes con
+  cancelación, purga con omisión de contactos con mensajes, protección de
+  listas con campañas sin materializar, permisos admin/operador, no
+  reactivación por importación y coherencia worker-eliminación).
+
 ### Verificación funcional del panel (estadísticas reales y cuota SES)
 
 - **Retrasos de entrega visibles** (`services/stats.py`, `api/v1/stats.py`, frontend):

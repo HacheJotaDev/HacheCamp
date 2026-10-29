@@ -119,17 +119,28 @@ def test_import_csv_duplicados_en_archivo(client, admin_auth, importar_csv):
 
 
 def test_bulk_delete_eliminar(client, admin_auth):
+    """V5: modo=eliminar es borrado LÓGICO (papelera): fuera del listado
+    principal, conservando fila, mensajes y consentimientos; restaurable."""
+    marca = uuid.uuid4().hex[:8]
     ids = []
     for _ in range(3):
-        r = client.post("/api/v1/contacts", json={"email": f"bulk-{uuid.uuid4().hex[:6]}@test.local"})
+        r = client.post("/api/v1/contacts", json={"email": f"bulk-{marca}-{uuid.uuid4().hex[:6]}@test.local"})
         ids.append(r.json()["id"])
+    patron = f"bulk-{marca}"
     resp = client.post("/api/v1/contacts/bulk-delete",
                        json={"ids": ids, "modo": "eliminar", "confirmar": True})
     assert resp.status_code == 200, resp.text
-    assert resp.json()["procesados"] == 3
-    # Ya no existen
-    for cid in ids:
-        assert client.get(f"/api/v1/contacts/{cid}").status_code == 404
+    cuerpo = resp.json()
+    assert cuerpo["procesados"] == 3
+    assert cuerpo["afectados"] == 3 and cuerpo["operacion_id"]
+    # Fuera del listado principal…
+    assert client.get(f"/api/v1/contacts?q={patron}").json()["total"] == 0
+    # …pero en la papelera y recuperables
+    papelera = client.get(f"/api/v1/contacts/papelera?q={patron}").json()
+    assert papelera["total"] == 3
+    resp = client.post("/api/v1/contacts/restore-lote", json={"ids": ids})
+    assert resp.status_code == 200 and resp.json()["restaurados"] == 3
+    assert client.get(f"/api/v1/contacts?q={patron}").json()["total"] == 3
 
 
 def test_bulk_delete_requiere_confirmacion(client, admin_auth):

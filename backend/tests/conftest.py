@@ -201,3 +201,30 @@ def admin_auth(client):
     client.headers.update({"X-CSRF-Token": csrf})
     yield {"email": email, "csrf": csrf, "user_id": user_id, "user": data["user"]}
     client.headers.pop("X-CSRF-Token", None)
+
+
+@pytest.fixture
+def operador_auth(client):
+    """Sesión de OPERADOR (no admin): para probar permisos de acciones V5."""
+    import uuid
+    from app.core import security
+    from app.models import User
+
+    email = f"operador-{uuid.uuid4().hex[:8]}@test.local"
+    db = SessionLocal()
+    user = User(
+        email=email, name="Operador de pruebas", role="operador",
+        password_hash=security.hash_password("ClaveSegura123"),
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    db.close()
+
+    resp = client.post("/api/v1/auth/login", json={"email": email, "password": "ClaveSegura123"})
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    csrf = data["csrf_token"]
+    client.headers.update({"X-CSRF-Token": csrf})
+    yield {"email": email, "csrf": csrf, "user": data["user"]}
+    client.headers.pop("X-CSRF-Token", None)

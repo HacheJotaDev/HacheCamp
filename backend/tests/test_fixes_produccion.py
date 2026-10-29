@@ -153,32 +153,36 @@ def _crear_campana_con_mensaje(client, contact_id: str, email: str) -> str:
         db.close()
 
 
-def test_eliminar_contacto_individual_con_cascada(client, admin_auth):
-    """Eliminar un contacto individual borra sus mensajes y consent_history,
-    pero conserva la auditoría."""
+def test_eliminar_contacto_individual_preserva_historial(client, admin_auth):
+    """V5: eliminar un contacto individual (bulk-delete modo=eliminar) es un
+    BORRADO LÓGICO: el contacto pasa a la papelera y sus mensajes de campaña,
+    consentimientos y eventos SES se CONSERVAN (nunca cascada física); la
+    restauración recupera el contacto completo."""
     contacto = _crear_contacto(client, "cascada")
     campaign_id = _crear_campana_con_mensaje(client, contacto["id"], contacto["email"])
 
     resp = client.post("/api/v1/contacts/bulk-delete",
                        json={"ids": [contacto["id"]], "modo": "eliminar", "confirmar": True})
     assert resp.status_code == 200, resp.text
-    assert resp.json() == {"procesados": 1, "solicitados": 1, "modo": "eliminar"}
+    cuerpo = resp.json()
+    assert cuerpo["procesados"] == 1 and cuerpo["modo"] == "eliminar"
+    assert cuerpo["afectados"] == 1 and cuerpo["operacion_id"]
 
-    # El contacto ya no existe
-    assert client.get(f"/api/v1/contacts/{contacto['id']}").status_code == 404
+    # Fuera del listado principal, pero en la PAPELERA (no existe un 404)
+    assert client.get(f"/api/v1/contacts/{contacto['id']}").json()["deleted_at"] is not None
+    papelera = client.get("/api/v1/contacts/papelera").json()
+    assert any(c["id"] == contacto["id"] for c in papelera["items"])
 
     db = SessionLocal()
     try:
-        # Cascada: mensajes de campaña del contacto eliminados
+        # V5: NADA se borra físicamente — mensajes y consentimientos intactos
         mensajes = db.query(CampaignMessage).filter(
             CampaignMessage.contact_id == contacto["id"]).count()
-        assert mensajes == 0, "Los mensajes del contacto deben borrarse en cascada"
-        # La campaña sigue existiendo (no se rompe)
+        assert mensajes == 1, "Los mensajes del contacto deben conservarse (sin cascada)"
         assert db.get(Campaign, campaign_id) is not None
-        # Cascada: historial de consentimiento eliminado
         consent = db.query(ConsentEvent).filter(
             ConsentEvent.contact_id == contacto["id"]).count()
-        assert consent == 0
+        assert consent >= 1, "El historial de consentimiento debe conservarse"
         # Auditoría conservada
         audit_reg = (db.query(AuditLog)
                      .filter(AuditLog.action == "contactos_eliminados_masivo")
@@ -188,10 +192,19 @@ def test_eliminar_contacto_individual_con_cascada(client, admin_auth):
     finally:
         db.close()
 
+    # Restauración: recupera el contacto con su historial completo
+    resp = client.post(f"/api/v1/contacts/{contacto['id']}/restore")
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["deleted_at"] is None
+    lista = client.get("/api/v1/contacts?q=cascada").json()
+    assert lista["total"] == 1
+
 
 def test_eliminar_contacto_conserva_supresion_y_bloquea_reincorporacion(client, admin_auth, importar_csv):
     """Si el contacto tenía supresión (p. ej. por queja), al eliminarlo la
-    supresión se conserva: una reimportación no lo reactiva como suscripto."""
+    supresión se conserva; una reimportación NO lo reactiva ni siquiera como
+    fila nueva (V5: el contacto eliminado se omite con aviso y queda en la
+    papelera)."""
     email = _email("supres")
     r = client.post("/api/v1/contacts", json={"email": email})
     cid = r.json()["id"]
@@ -201,7 +214,7 @@ def test_eliminar_contacto_conserva_supresion_y_bloquea_reincorporacion(client, 
                            json={"email": email, "reason": "manual"})
     assert resp_sup.status_code in (200, 201), resp_sup.text
 
-    # Eliminación definitiva del contacto
+    # Eliminación (borrado lógico, papelera)
     resp = client.post("/api/v1/contacts/bulk-delete",
                        json={"ids": [cid], "modo": "eliminar", "confirmar": True})
     assert resp.status_code == 200
@@ -213,14 +226,20 @@ def test_eliminar_contacto_conserva_supresion_y_bloquea_reincorporacion(client, 
     finally:
         db.close()
 
-    # Reimportar el mismo correo: NO debe quedar suscripto (protección por supresión)
+    # Reimportar el mismo correo: el contacto eliminado NO se reactiva (V5:
+    # upsert omite con aviso eliminado_omitido; jamás pasa a suscripto)
     contenido = f"email\n{email}\n".encode()
     progreso = importar_csv(contenido, consent_source="importacion_csv")
     assert progreso["estado"] == "completado"
+    assert progreso["creados"] == 0
+    assert progreso["notices"].get("eliminado_omitido") == 1
+    # No aparece en el listado principal (sigue en papelera, nunca suscripto)
     lista = client.get(f"/api/v1/contacts?q={email}").json()
-    assert lista["total"] == 1
-    assert lista["items"][0]["status"] == "dado_baja", (
-        "Un correo suprimido nunca debe volver como suscripto"
+    assert lista["total"] == 0
+    en_papelera = client.get(f"/api/v1/contacts/papelera?q={email}").json()
+    assert en_papelera["total"] == 1
+    assert en_papelera["items"][0]["status"] == "dado_baja", (
+        "Un correo suprimido nunca debe estar suscripto"
     )
 
 
