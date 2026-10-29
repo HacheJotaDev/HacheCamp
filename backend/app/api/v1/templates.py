@@ -274,8 +274,6 @@ def send_test(payload: SendTestRequest, request: Request,
     la solicitud, incluso si un cliente antiguo los envía. Solo el
     destinatario es editable e independiente.
     """
-    from app.services import ses as ses_service
-
     cfg = config_efectiva(db)
     from_email = cfg["from_email"]
     from_name = cfg["from_name"]
