@@ -2,11 +2,12 @@
 
 import { use, useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
   ArrowLeft, Loader2, Send, CheckCircle2, CalendarClock, Pause, Play, XCircle,
-  Copy, TestTube2, RefreshCw, FileText,
+  Copy, TestTube2, RefreshCw, FileText, Archive, ArchiveRestore, Trash2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -28,6 +29,7 @@ import { useAuth } from "@/lib/providers";
 
 export default function CampanaDetallePage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
+  const router = useRouter();
   const { user } = useAuth();
   const qc = useQueryClient();
   const esAdmin = user?.role === "admin";
@@ -92,9 +94,33 @@ export default function CampanaDetallePage({ params }: { params: Promise<{ id: s
 
   const duplicar = useMutation({
     mutationFn: () => api.post<Campaign>(`/api/v1/campaigns/${id}/duplicate`),
-    onSuccess: (nueva) => { toast.success("Campaña duplicada"); window.location.href = `/panel/campanas/${nueva.id}`; },
+    onSuccess: (nueva) => { toast.success("Campaña duplicada"); router.push(`/panel/campanas/${nueva.id}`); },
     onError: (e: Error) => toast.error(e.message),
   });
+
+  const archivar = useMutation({
+    mutationFn: () => api.post(`/api/v1/campaigns/${id}/${c?.archived_at ? "unarchive" : "archive"}`),
+    onSuccess: () => {
+      toast.success(c?.archived_at ? "Campaña desarchivada" : "Campaña archivada");
+      invalidate();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  const eliminar = useMutation({
+    mutationFn: () => api.delete<{ estado: string; mensajes_cancelados: number }>(
+      `/api/v1/campaigns/${id}?confirmar=true`),
+    onSuccess: (res) => {
+      toast.success(
+        res.mensajes_cancelados > 0
+          ? `Campaña en la papelera (${res.mensajes_cancelados} envíos pendientes cancelados)`
+          : "Campaña en la papelera");
+      router.push("/panel/campanas");
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  const [dialogoEliminar, setDialogoEliminar] = useState(false);
 
   const { data: mensajes } = useQuery({
     queryKey: ["mensajes-campana", id],
@@ -193,6 +219,17 @@ export default function CampanaDetallePage({ params }: { params: Promise<{ id: s
           )}
           <Button size="sm" variant="outline" onClick={() => setDialogoPrueba(true)}><TestTube2 className="mr-1.5 h-4 w-4" /> Prueba</Button>
           <Button size="sm" variant="ghost" onClick={() => duplicar.mutate()}><Copy className="mr-1.5 h-4 w-4" /> Duplicar</Button>
+          {c.status !== "programada" && (
+            <Button size="sm" variant="ghost" onClick={() => archivar.mutate()} title={c.archived_at ? "Quitar del archivo" : "Archivar campaña"}>
+              {c.archived_at ? <><ArchiveRestore className="mr-1.5 h-4 w-4" /> Desarchivar</> : <><Archive className="mr-1.5 h-4 w-4" /> Archivar</>}
+            </Button>
+          )}
+          {esAdmin && (
+            <Button size="sm" variant="ghost" className="text-red-600 hover:text-red-700"
+              onClick={() => setDialogoEliminar(true)}>
+              <Trash2 className="mr-1.5 h-4 w-4" /> Eliminar
+            </Button>
+          )}
         </div>
       </div>
 
@@ -382,6 +419,30 @@ export default function CampanaDetallePage({ params }: { params: Promise<{ id: s
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Confirmación de eliminación -> papelera */}
+      <AlertDialog open={dialogoEliminar} onOpenChange={setDialogoEliminar}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>¿Eliminar «{c.name}»?</AlertDialogTitle>
+            <AlertDialogDescription>
+              La campaña pasará a la <b>papelera</b> (borrado lógico): historial,
+              mensajes y eventos SES se conservan y un administrador podrá restaurarla.
+              {["en_cola", "enviando", "pausada", "programada"].includes(c.status) && (
+                <> Además se <b>cancelará</b>: los envíos pendientes se detienen y
+                ningún mensaje aceptado por SES se reenvía.</>
+              )}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancelar</AlertDialogCancel>
+            <AlertDialogAction className="bg-red-600 hover:bg-red-700"
+              onClick={() => eliminar.mutate()}>
+              Eliminar
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

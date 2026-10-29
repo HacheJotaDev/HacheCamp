@@ -126,6 +126,7 @@ export interface Contact {
   source: string | null;
   created_at: string;
   updated_at: string;
+  deleted_at: string | null;
   tags?: Tag[];
   lists?: ContactList[];
 }
@@ -135,6 +136,26 @@ export interface ContactList {
   name: string;
   description: string | null;
   created_at: string;
+  deleted_at: string | null;
+  contactos?: number | null;
+}
+
+/** V5: operación masiva de contactos (papelera/vaciado/purga). */
+export interface BulkOperation {
+  id: string;
+  tipo: string;
+  status: "pendiente" | "procesando" | "completada" | "fallida" | "cancelada" | "cancelada_parcial";
+  total_objetivo: number;
+  procesados: number;
+  afectados: number;
+  omitidos: number;
+  progreso_pct: number;
+  cancel_requested: boolean;
+  last_error: string | null;
+  user_email: string | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
 }
 
 export interface Tag {
@@ -266,6 +287,8 @@ export interface Campaign {
   completed_at: string | null;
   created_at: string;
   updated_at: string;
+  archived_at: string | null;
+  deleted_at: string | null;
   progreso?: {
     total: number;
     procesados: number;
@@ -322,6 +345,8 @@ export interface DashboardData {
     retrasos?: number;
     incierto?: number;
     success_rate: number | null;
+    entrega_rate?: number | null;
+    en_vuelo?: number;
     bounce_rate: number | null;
     open_rate: number | null;
     click_rate: number | null;

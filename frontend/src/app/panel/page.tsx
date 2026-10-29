@@ -132,8 +132,10 @@ export default function PanelPage() {
       ) : (
         <>
           <div className="grid gap-3 grid-cols-2 lg:grid-cols-4">
+            <TasaCard titulo="Entrega (progreso)" tasa={m?.entrega_rate ?? null} icon={Target}
+              tono="text-emerald-600" detalle="Entregas confirmadas / aceptados por SES" />
             <TasaCard titulo="Success Rate" tasa={m?.success_rate} icon={Target}
-              tono="text-emerald-600" detalle="Entregas confirmadas / resultados definitivos" />
+              tono="text-emerald-600" detalle="Entregas / SOLO resultados definitivos (sin en vuelo)" />
             <TasaCard titulo="Bounce Rate" tasa={m?.bounce_rate} icon={AlertTriangle}
               tono="text-amber-600" detalle="Rebotes / aceptados por SES" />
             <TasaCard titulo="Open Rate" tasa={m?.open_rate} icon={Eye}
@@ -149,8 +151,10 @@ export default function PanelPage() {
               detalle="Aceptados para envío" tono="text-sky-600" />
             <StatCard titulo="Delivered" valor={numero(m?.entregados ?? 0)} icon={CheckCircle2}
               detalle="Entregas confirmadas" />
-            <StatCard titulo="Pending" valor={numero(m?.pendientes ?? 0)} icon={Clock}
-              detalle="Pendientes y en proceso" tono="text-muted-foreground" />
+            <StatCard titulo="En vuelo" valor={numero(m?.en_vuelo ?? 0)} icon={Clock}
+              detalle="Aceptados por SES sin resultado definitivo" tono="text-sky-600" />
+            <StatCard titulo="Pendientes de envío" valor={numero(m?.pendientes ?? 0)} icon={Clock}
+              detalle="Aún sin aceptación de SES" tono="text-muted-foreground" />
             <StatCard titulo="Failed" valor={numero(m?.fallidos ?? 0)} icon={XCircle}
               detalle="No se pudieron enviar" tono="text-red-600" />
             <StatCard titulo="Bounce" valor={numero((m?.rebotes ?? 0) + (m?.rebotes_temporales ?? 0))} icon={AlertTriangle}

@@ -4,55 +4,104 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
-  FolderOpen, Plus, Loader2, Trash2, Tags, Users,
+  Eraser, FolderOpen, Loader2, Pencil, Plus, Search, Trash2, Tags, Undo2, Users,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Badge } from "@/components/ui/badge";
 import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
   AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
+import {
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { api, ContactList, Segment } from "@/lib/api";
-import { EmptyState, fecha } from "@/components/shared";
+import { useAuth } from "@/lib/providers";
+import { EmptyState, fecha, numero } from "@/components/shared";
 
 export default function ListasPage() {
   const qc = useQueryClient();
+  const { user } = useAuth();
+  const esAdmin = user?.role === "admin";
   const [nombre, setNombre] = useState("");
   const [descripcion, setDescripcion] = useState("");
+  const [q, setQ] = useState("");
+  const [papelera, setPapelera] = useState(false);
+  const [editando, setEditando] = useState<ContactList | null>(null);
+  const [editNombre, setEditNombre] = useState("");
+  const [editDesc, setEditDesc] = useState("");
+  const [aVaciar, setAVaciar] = useState<ContactList | null>(null);
   const [segNombre, setSegNombre] = useState("");
   const [segCampo, setSegCampo] = useState("email");
   const [segOp, setSegOp] = useState("contiene");
   const [segValor, setSegValor] = useState("");
 
   const { data: listas, isLoading } = useQuery({
-    queryKey: ["listas"],
-    queryFn: () => api.get<ContactList[]>("/api/v1/lists"),
+    queryKey: ["listas", q, papelera],
+    queryFn: () => api.get<ContactList[]>(
+      `/api/v1/lists${papelera ? "/papelera" : ""}${q.trim() ? `?q=${encodeURIComponent(q.trim())}` : ""}`),
   });
   const { data: segmentos } = useQuery({
     queryKey: ["segmentos"],
     queryFn: () => api.get<Segment[]>("/api/v1/segments"),
   });
 
+  const invalidar = () => qc.invalidateQueries({ queryKey: ["listas"] });
+
   const crearLista = useMutation({
     mutationFn: () => api.post("/api/v1/lists", { name: nombre.trim(), description: descripcion.trim() || null }),
     onSuccess: () => {
       toast.success("Lista creada");
       setNombre(""); setDescripcion("");
-      qc.invalidateQueries({ queryKey: ["listas"] });
+      invalidar();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  const guardarEdicion = useMutation({
+    mutationFn: () => api.patch(`/api/v1/lists/${editando?.id}`, {
+      name: editNombre.trim(), description: editDesc.trim() || null,
+    }),
+    onSuccess: () => {
+      toast.success("Lista actualizada");
+      setEditando(null);
+      invalidar();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  const vaciarLista = useMutation({
+    mutationFn: (l: ContactList) => api.post<{ asociaciones_eliminadas: number }>(
+      `/api/v1/lists/${l.id}/empty?confirmar=true`),
+    onSuccess: (d) => {
+      toast.success(`Lista vaciada: ${numero(d.asociaciones_eliminadas)} asociaciones eliminadas (contactos intactos)`);
+      setAVaciar(null);
+      invalidar();
+      qc.invalidateQueries({ queryKey: ["contactos"] });
     },
     onError: (e: Error) => toast.error(e.message),
   });
 
   const borrarLista = useMutation({
-    mutationFn: (id: string) => api.delete(`/api/v1/lists/${id}`),
+    mutationFn: (id: string) => api.delete(`/api/v1/lists/${id}?confirmar=true`),
     onSuccess: () => {
-      toast.success("Lista eliminada (los contactos no se borran)");
-      qc.invalidateQueries({ queryKey: ["listas"] });
+      toast.success("Lista en la papelera (los contactos no se borran)");
+      invalidar();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  const restaurarLista = useMutation({
+    mutationFn: (id: string) => api.post(`/api/v1/lists/${id}/restore`),
+    onSuccess: () => {
+      toast.success("Lista restaurada");
+      invalidar();
     },
     onError: (e: Error) => toast.error(e.message),
   });
@@ -79,12 +128,19 @@ export default function ListasPage() {
     onError: (e: Error) => toast.error(e.message),
   });
 
+  function empezarEdicion(l: ContactList) {
+    setEditando(l);
+    setEditNombre(l.name);
+    setEditDesc(l.description || "");
+  }
+
   return (
     <div className="space-y-4">
       <div>
         <h1 className="text-2xl font-bold tracking-tight">Listas y segmentos</h1>
         <p className="text-sm text-muted-foreground">
-          Organiza tus destinatarios. Eliminar una lista no borra los contactos.
+          Organiza tus destinatarios. Eliminar una lista no borra los contactos;
+          vaciarla solo desvincula.
         </p>
       </div>
 
@@ -95,38 +151,85 @@ export default function ListasPage() {
         </TabsList>
 
         <TabsContent value="listas" className="space-y-4 mt-2">
-          <Card>
-            <CardHeader className="pb-2">
-              <CardTitle className="text-base">Nueva lista</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-3">
-              <div className="grid sm:grid-cols-2 gap-3">
-                <div className="space-y-1.5">
-                  <Label htmlFor="l-nombre">Nombre *</Label>
-                  <Input id="l-nombre" value={nombre} onChange={(e) => setNombre(e.target.value)}
-                    placeholder="p. ej. Clientes activos" />
+          {!editando && (
+            <Card>
+              <CardHeader className="pb-2">
+                <CardTitle className="text-base">Nueva lista</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <div className="grid sm:grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <Label htmlFor="l-nombre">Nombre *</Label>
+                    <Input id="l-nombre" value={nombre} onChange={(e) => setNombre(e.target.value)}
+                      placeholder="p. ej. Clientes activos" />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="l-desc">Descripción</Label>
+                    <Input id="l-desc" value={descripcion} onChange={(e) => setDescripcion(e.target.value)}
+                      placeholder="Opcional" />
+                  </div>
                 </div>
-                <div className="space-y-1.5">
-                  <Label htmlFor="l-desc">Descripción</Label>
-                  <Input id="l-desc" value={descripcion} onChange={(e) => setDescripcion(e.target.value)}
-                    placeholder="Opcional" />
+                <Button className="bg-emerald-600 hover:bg-emerald-700"
+                  disabled={nombre.trim().length < 2 || crearLista.isPending}
+                  onClick={() => crearLista.mutate()}>
+                  {crearLista.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Plus className="mr-2 h-4 w-4" />}
+                  Crear lista
+                </Button>
+              </CardContent>
+            </Card>
+          )}
+
+          {editando && (
+            <Card>
+              <CardHeader className="pb-2">
+                <CardTitle className="text-base">Editar «{editando.name}»</CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-3">
+                <div className="grid sm:grid-cols-2 gap-3">
+                  <div className="space-y-1.5">
+                    <Label htmlFor="e-nombre">Nombre *</Label>
+                    <Input id="e-nombre" value={editNombre} onChange={(e) => setEditNombre(e.target.value)} />
+                  </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="e-desc">Descripción</Label>
+                    <Input id="e-desc" value={editDesc} onChange={(e) => setEditDesc(e.target.value)} />
+                  </div>
                 </div>
-              </div>
-              <Button className="bg-emerald-600 hover:bg-emerald-700"
-                disabled={nombre.trim().length < 2 || crearLista.isPending}
-                onClick={() => crearLista.mutate()}>
-                {crearLista.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Plus className="mr-2 h-4 w-4" />}
-                Crear lista
-              </Button>
-            </CardContent>
-          </Card>
+                <div className="flex gap-2">
+                  <Button className="bg-emerald-600 hover:bg-emerald-700"
+                    disabled={editNombre.trim().length < 2 || guardarEdicion.isPending}
+                    onClick={() => guardarEdicion.mutate()}>
+                    {guardarEdicion.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
+                    Guardar
+                  </Button>
+                  <Button variant="outline" onClick={() => setEditando(null)}>Cancelar</Button>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
+          <div className="flex gap-2 flex-wrap">
+            <div className="relative flex-1 min-w-[200px]">
+              <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+              <Input value={q} onChange={(e) => setQ(e.target.value)}
+                placeholder="Buscar listas por nombre o descripción…" className="pl-8" />
+            </div>
+            <Button variant={papelera ? "default" : "outline"} onClick={() => setPapelera(!papelera)}>
+              <Trash2 className="mr-2 h-4 w-4" /> Papelera
+            </Button>
+          </div>
 
           {isLoading ? (
             <div className="space-y-2">{Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-14" />)}</div>
           ) : !listas || listas.length === 0 ? (
             <Card><CardContent>
-              <EmptyState icon={FolderOpen} titulo="Sin listas todavía"
-                descripcion="Crea una lista para agrupar contactos y seleccionarla en tus campañas." />
+              {papelera ? (
+                <EmptyState icon={Trash2} titulo="Papelera vacía"
+                  descripcion="Las listas eliminadas aparecen aquí y pueden restaurarse." />
+              ) : (
+                <EmptyState icon={FolderOpen} titulo="Sin listas todavía"
+                  descripcion="Crea una lista para agrupar contactos y seleccionarla en tus campañas." />
+              )}
             </CardContent></Card>
           ) : (
             <div className="space-y-2">
@@ -137,35 +240,58 @@ export default function ListasPage() {
                       <Users className="h-4 w-4 text-emerald-600" />
                     </div>
                     <div className="min-w-0 flex-1">
-                      <p className="font-medium truncate">{l.name}</p>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <p className="font-medium truncate">{l.name}</p>
+                        <Badge variant="secondary" className="tabular-nums shrink-0">
+                          {numero(l.contactos ?? 0)} contactos
+                        </Badge>
+                      </div>
                       <p className="text-xs text-muted-foreground truncate">
                         {l.description || "Sin descripción"} · creada {fecha(l.created_at)}
                       </p>
                     </div>
-                    <AlertDialog>
-                      <AlertDialogTrigger asChild>
-                        <Button size="icon" variant="ghost" aria-label={`Eliminar ${l.name}`}
-                          className="text-red-600 hover:text-red-700 shrink-0">
-                          <Trash2 className="h-4 w-4" />
+                    {papelera ? (
+                      esAdmin && (
+                        <Button size="icon" variant="ghost" title="Restaurar lista"
+                          onClick={() => restaurarLista.mutate(l.id)}>
+                          <Undo2 className="h-4 w-4" />
                         </Button>
-                      </AlertDialogTrigger>
-                      <AlertDialogContent>
-                        <AlertDialogHeader>
-                          <AlertDialogTitle>¿Eliminar la lista «{l.name}»?</AlertDialogTitle>
-                          <AlertDialogDescription>
-                            Los contactos no se eliminan: solo se desvinculan de esta lista.
-                            Las campañas que la usen dejarán de tener destinatarios asignados.
-                          </AlertDialogDescription>
-                        </AlertDialogHeader>
-                        <AlertDialogFooter>
-                          <AlertDialogCancel>Cancelar</AlertDialogCancel>
-                          <AlertDialogAction className="bg-red-600 hover:bg-red-700"
-                            onClick={() => borrarLista.mutate(l.id)}>
-                            Eliminar lista
-                          </AlertDialogAction>
-                        </AlertDialogFooter>
-                      </AlertDialogContent>
-                    </AlertDialog>
+                      )
+                    ) : (
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button size="icon" variant="ghost" aria-label={`Acciones de ${l.name}`}>
+                            <Pencil className="h-4 w-4" />
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end">
+                          <DropdownMenuItem onClick={() => empezarEdicion(l)}>
+                            <Pencil className="mr-2 h-4 w-4" /> Renombrar / descripción
+                          </DropdownMenuItem>
+                          <DropdownMenuItem onClick={() => setAVaciar(l)}
+                            disabled={(l.contactos ?? 0) === 0}>
+                            <Eraser className="mr-2 h-4 w-4" /> Vaciar lista
+                          </DropdownMenuItem>
+                          {esAdmin && (
+                            <>
+                              <DropdownMenuSeparator />
+                              <DropdownMenuItem asChild>
+                                <button
+                                  type="button"
+                                  className="w-full text-red-600 focus:text-red-600 cursor-pointer"
+                                  onClick={(e) => {
+                                    e.preventDefault();
+                                    borrarLista.mutate(l.id);
+                                  }}
+                                >
+                                  <Trash2 className="mr-2 h-4 w-4" /> Eliminar lista
+                                </button>
+                              </DropdownMenuItem>
+                            </>
+                          )}
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    )}
                   </CardContent>
                 </Card>
               ))}
@@ -265,6 +391,26 @@ export default function ListasPage() {
           )}
         </TabsContent>
       </Tabs>
+
+      <AlertDialog open={!!aVaciar} onOpenChange={(v) => !v && setAVaciar(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>¿Vaciar la lista «{aVaciar?.name}»?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Se eliminarán las <b>{numero(aVaciar?.contactos ?? 0)} asociaciones</b> de esta lista.
+              Los contactos <b>no se borran</b> de la base global y siguen en sus otras listas.
+              El número de contactos de la lista quedará en cero.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancelar</AlertDialogCancel>
+            <AlertDialogAction className="bg-amber-600 hover:bg-amber-700"
+              onClick={() => aVaciar && vaciarLista.mutate(aVaciar)}>
+              Vaciar lista
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

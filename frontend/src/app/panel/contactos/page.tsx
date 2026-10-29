@@ -6,7 +6,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
   Users, Plus, Upload, Download, Search, Loader2, FileSpreadsheet, Trash2, Eye,
-  ListX, CheckCircle2, XCircle, Ban, Clock,
+  ListX, CheckCircle2, XCircle, Ban, Clock, Undo2, Eraser, AlertTriangle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -22,26 +22,51 @@ import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
   AlertDialogFooter, AlertDialogHeader, AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { api, Contact, ContactList, ImportJob, Paged } from "@/lib/api";
+import { api, BulkOperation, Contact, ContactList, ImportJob, Paged } from "@/lib/api";
+import { useAuth } from "@/lib/providers";
 import { EmptyState, StatusBadge, fecha, numero } from "@/components/shared";
+
+const ETIQUETAS_TIPO_BULK: Record<string, string> = {
+  eliminar_ids: "Eliminar selección",
+  eliminar_filtro: "Eliminar filtrados",
+  vaciar_todo: "Vaciar todos los contactos",
+  purgar: "Purga física",
+};
+
+const ETIQUETAS_ESTADO_BULK: Record<BulkOperation["status"], string> = {
+  pendiente: "En cola",
+  procesando: "Procesando",
+  completada: "Completada",
+  fallida: "Fallida",
+  cancelada: "Cancelada",
+  cancelada_parcial: "Cancelada (parcial)",
+};
 
 export default function ContactosPage() {
   const [q, setQ] = useState("");
   const [estado, setEstado] = useState("todos");
   const [listId, setListId] = useState("todas");
   const [page, setPage] = useState(1);
+  const [papelera, setPapelera] = useState(false);
   const [seleccion, setSeleccion] = useState<Set<string>>(new Set());
   // ids a eliminar en el diálogo de confirmación (selección múltiple o fila individual)
   const [idsAEliminar, setIdsAEliminar] = useState<string[] | null>(null);
+  const [aEliminarFiltrados, setAEliminarFiltrados] = useState(false);
+  const [vaciarAbierto, setVaciarAbierto] = useState(false);
+  // Operación masiva en curso (progreso del panel)
+  const [opId, setOpId] = useState<string | null>(null);
   const qc = useQueryClient();
+  const { user } = useAuth();
+  const esAdmin = user?.role === "admin";
 
   const filtros = useMemo(() => {
     const p = new URLSearchParams({ page: String(page), per_page: "25" });
     if (q) p.set("q", q);
     if (estado !== "todos") p.set("estado", estado);
     if (listId !== "todas") p.set("list_id", listId);
+    if (papelera) p.set("papelera", "true");
     return p.toString();
-  }, [q, estado, listId, page]);
+  }, [q, estado, listId, page, papelera]);
 
   const { data, isLoading } = useQuery({
     queryKey: ["contactos", filtros],
@@ -53,21 +78,79 @@ export default function ContactosPage() {
     queryFn: () => api.get<ContactList[]>("/api/v1/lists"),
   });
 
+  // Progreso de la última operación masiva lanzada desde esta sesión
+  const { data: op } = useQuery({
+    queryKey: ["bulk-op", opId],
+    queryFn: () => api.get<BulkOperation>(`/api/v1/contacts/bulk/${opId}`),
+    enabled: !!opId,
+    refetchInterval: (query) =>
+      query.state.data && (query.state.data.status === "pendiente" || query.state.data.status === "procesando")
+        ? 2000 : false,
+  });
+
+  const opActiva = !!op && (op.status === "pendiente" || op.status === "procesando");
+
+  useEffect(() => {
+    if (op && !opActiva) {
+      qc.invalidateQueries({ queryKey: ["contactos"] });
+    }
+  }, [opActiva, op, qc]);
+
   const invalidar = () => {
     qc.invalidateQueries({ queryKey: ["contactos"] });
+    qc.invalidateQueries({ queryKey: ["bulk-op"] });
     setSeleccion(new Set());
   };
 
   const borrarMasivo = useMutation({
     mutationFn: (modo: "eliminar" | "dar_baja") =>
-      api.post<{ procesados: number }>("/api/v1/contacts/bulk-delete", {
+      api.post<{ procesados: number; afectados?: number }>("/api/v1/contacts/bulk-delete", {
         ids: idsAEliminar ?? [], modo, confirmar: true,
       }),
     onSuccess: (res, modo) => {
       toast.success(modo === "eliminar"
-        ? `${res.procesados} contacto(s) eliminados`
+        ? `${res.afectados ?? res.procesados} contacto(s) en la papelera (restaurables)`
         : `${res.procesados} contacto(s) dados de baja y suprimidos`);
       setIdsAEliminar(null);
+      invalidar();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  const eliminarFiltrados = useMutation({
+    mutationFn: () =>
+      api.post<BulkOperation>("/api/v1/contacts/bulk-delete-filtrado", {
+        q: q || null, estado: estado !== "todos" ? estado : null,
+        list_id: listId !== "todas" ? listId : null, confirmar: true,
+      }),
+    onSuccess: (res) => {
+      toast.info(`Eliminación en cola: ${numero(res.total_objetivo)} contacto(s) en proceso`);
+      setAEliminarFiltrados(false);
+      setOpId(res.id);
+      invalidar();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  const cancelarOp = useMutation({
+    mutationFn: (id: string) => api.post(`/api/v1/contacts/bulk/${id}/cancel`),
+    onSuccess: () => toast.info("Cancelación solicitada (efectiva entre lotes)"),
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  const restaurarOp = useMutation({
+    mutationFn: (id: string) => api.post<{ restaurados: number }>(`/api/v1/contacts/bulk/${id}/restore`),
+    onSuccess: (res) => {
+      toast.success(`${numero(res.restaurados)} contacto(s) restaurados`);
+      invalidar();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  const restaurarIndividual = useMutation({
+    mutationFn: (id: string) => api.post(`/api/v1/contacts/${id}/restore`),
+    onSuccess: () => {
+      toast.success("Contacto restaurado");
       invalidar();
     },
     onError: (e: Error) => toast.error(e.message),
@@ -83,9 +166,11 @@ export default function ContactosPage() {
     <div className="space-y-4">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight">Contactos</h1>
+          <h1 className="text-2xl font-bold tracking-tight">
+            Contactos {papelera && <span className="text-muted-foreground">· Papelera</span>}
+          </h1>
           <p className="text-sm text-muted-foreground">
-            {data ? `${numero(data.total)} contacto(s) en total` : "Suscriptores de tus campañas"}
+            {data ? `${numero(data.total)} contacto(s)${papelera ? " en papelera" : ""}` : "Suscriptores de tus campañas"}
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -97,7 +182,62 @@ export default function ContactosPage() {
         </div>
       </div>
 
-      {seleccion.size > 0 && (
+      {/* Barra de herramientas */}
+      <div className="flex flex-wrap items-center gap-2">
+        <Button variant={papelera ? "default" : "outline"} onClick={() => { setPapelera(!papelera); setPage(1); }}>
+          <Trash2 className="mr-2 h-4 w-4" /> Papelera
+        </Button>
+        {esAdmin && !papelera && (
+          <>
+            <Button variant="outline" onClick={() => setAEliminarFiltrados(true)}>
+              <Eraser className="mr-2 h-4 w-4" /> Eliminar filtrados…
+            </Button>
+            <Button variant="outline" className="text-red-600 hover:text-red-700 border-red-600/40"
+              onClick={() => setVaciarAbierto(true)}>
+              <AlertTriangle className="mr-2 h-4 w-4" /> Vaciar todos los contactos
+            </Button>
+          </>
+        )}
+      </div>
+
+      {/* Progreso de operación masiva */}
+      {op && (
+        <Card>
+          <CardContent className="p-4 space-y-2">
+            <div className="flex items-center gap-2 text-sm flex-wrap">
+              <span className="font-medium">{ETIQUETAS_TIPO_BULK[op.tipo] ?? op.tipo}</span>
+              <span className={opActiva ? "text-emerald-600" : "text-muted-foreground"}>
+                {ETIQUETAS_ESTADO_BULK[op.status] ?? op.status}
+              </span>
+              {op.cancel_requested && opActiva && <span className="text-amber-600 text-xs">· cancelando…</span>}
+            </div>
+            <Progress value={op.progreso_pct} />
+            <p className="text-xs text-muted-foreground">
+              {numero(op.procesados)} de {numero(op.total_objetivo)} ({op.progreso_pct}%)
+              {opActiva && " · continúa en segundo plano; puedes navegar por el panel"}
+            </p>
+            <div className="flex flex-wrap gap-2 text-xs">
+              <span className="rounded bg-muted px-2 py-0.5">Afectados: {numero(op.afectados)}</span>
+              {op.omitidos > 0 && <span className="rounded bg-muted px-2 py-0.5">Omitidos: {numero(op.omitidos)}</span>}
+            </div>
+            {op.status === "fallida" && op.last_error && (
+              <p className="text-xs text-red-600">{op.last_error}</p>
+            )}
+            {!opActiva && op.afectados > 0 && op.tipo !== "purgar" && esAdmin && (
+              <Button size="sm" variant="outline" onClick={() => restaurarOp.mutate(op.id)}>
+                <Undo2 className="mr-2 h-4 w-4" /> Restaurar los {numero(op.afectados)} eliminados
+              </Button>
+            )}
+            {opActiva && (
+              <Button size="sm" variant="outline" onClick={() => cancelarOp.mutate(op.id)}>
+                <Ban className="mr-2 h-4 w-4" /> Cancelar operación
+              </Button>
+            )}
+          </CardContent>
+        </Card>
+      )}
+
+      {seleccion.size > 0 && !papelera && (
         <div className="flex flex-wrap items-center gap-3 rounded-lg border bg-emerald-500/5 px-4 py-3 text-sm">
           <span className="font-medium">{seleccion.size} seleccionado(s)</span>
           <div className="flex gap-2 ml-auto">
@@ -134,7 +274,7 @@ export default function ContactosPage() {
                 <SelectItem value="queja">Queja</SelectItem>
               </SelectContent>
             </Select>
-            <Select value={listId} onValueChange={(v) => { setListId(v); setPage(1); }}>
+            <Select value={listId} onValueChange={(v) => { setListId(v); setPage(1); }} disabled={papelera}>
               <SelectTrigger className="w-full sm:w-44"><SelectValue /></SelectTrigger>
               <SelectContent>
                 <SelectItem value="todas">Todas las listas</SelectItem>
@@ -147,11 +287,13 @@ export default function ContactosPage() {
             <div className="space-y-2">{Array.from({ length: 6 }).map((_, i) => <Skeleton key={i} className="h-12" />)}</div>
           ) : !data || data.items.length === 0 ? (
             <EmptyState
-              icon={Users}
-              titulo={q || estado !== "todos" ? "Sin resultados" : "Aún no hay contactos"}
-              descripcion={q || estado !== "todos"
-                ? "Prueba con otros criterios de búsqueda."
-                : "Importa tu lista CSV/TXT o crea un contacto escribiendo solo su correo."}
+              icon={papelera ? Trash2 : Users}
+              titulo={papelera ? "Papelera vacía" : q || estado !== "todos" ? "Sin resultados" : "Aún no hay contactos"}
+              descripcion={papelera
+                ? "Los contactos eliminados aparecen aquí y pueden restaurarse con su historial completo."
+                : q || estado !== "todos"
+                  ? "Prueba con otros criterios de búsqueda."
+                  : "Importa tu lista CSV/TXT o crea un contacto escribiendo solo su correo."}
             />
           ) : (
             <>
@@ -159,34 +301,38 @@ export default function ContactosPage() {
                 <Table>
                   <TableHeader>
                     <TableRow>
-                      <TableHead className="w-10">
-                        <Checkbox
-                          aria-label="Seleccionar todos"
-                          checked={todosSeleccionados}
-                          onCheckedChange={alternarTodos}
-                        />
-                      </TableHead>
+                      {!papelera && (
+                        <TableHead className="w-10">
+                          <Checkbox
+                            aria-label="Seleccionar todos"
+                            checked={todosSeleccionados}
+                            onCheckedChange={alternarTodos}
+                          />
+                        </TableHead>
+                      )}
                       <TableHead>Correo</TableHead>
                       <TableHead>Estado</TableHead>
                       <TableHead className="hidden md:table-cell">Listas</TableHead>
-                      <TableHead className="hidden md:table-cell">Alta</TableHead>
+                      <TableHead className="hidden md:table-cell">{papelera ? "Eliminado" : "Alta"}</TableHead>
                       <TableHead className="text-right">Acciones</TableHead>
                     </TableRow>
                   </TableHeader>
                   <TableBody>
                     {data.items.map((c) => (
                       <TableRow key={c.id} className={seleccion.has(c.id) ? "bg-emerald-500/5" : ""}>
-                        <TableCell>
-                          <Checkbox
-                            aria-label={`Seleccionar ${c.email}`}
-                            checked={seleccion.has(c.id)}
-                            onCheckedChange={(v) => {
-                              const nuevo = new Set(seleccion);
-                              if (v) nuevo.add(c.id); else nuevo.delete(c.id);
-                              setSeleccion(nuevo);
-                            }}
-                          />
-                        </TableCell>
+                        {!papelera && (
+                          <TableCell>
+                            <Checkbox
+                              aria-label={`Seleccionar ${c.email}`}
+                              checked={seleccion.has(c.id)}
+                              onCheckedChange={(v) => {
+                                const nuevo = new Set(seleccion);
+                                if (v) nuevo.add(c.id); else nuevo.delete(c.id);
+                                setSeleccion(nuevo);
+                              }}
+                            />
+                          </TableCell>
+                        )}
                         <TableCell>
                           <Link href={`/panel/contactos/${c.id}`} className="font-medium hover:text-emerald-600 hover:underline break-all">
                             {c.email}
@@ -196,19 +342,35 @@ export default function ContactosPage() {
                         <TableCell className="hidden md:table-cell text-sm text-muted-foreground">
                           {c.lists?.map((l) => l.name).join(", ") || "—"}
                         </TableCell>
-                        <TableCell className="hidden md:table-cell text-sm text-muted-foreground">{fecha(c.created_at)}</TableCell>
+                        <TableCell className="hidden md:table-cell text-sm text-muted-foreground">
+                          {papelera ? fecha(c.deleted_at ?? c.created_at) : fecha(c.created_at)}
+                        </TableCell>
                         <TableCell className="text-right">
                           <div className="flex items-center justify-end gap-0.5">
-                            <Button variant="ghost" size="icon" asChild aria-label="Ver detalle">
-                              <Link href={`/panel/contactos/${c.id}`}><Eye className="h-4 w-4" /></Link>
-                            </Button>
-                            <Button
-                              variant="ghost" size="icon" aria-label={`Eliminar ${c.email}`}
-                              className="text-red-600 hover:text-red-700"
-                              onClick={() => setIdsAEliminar([c.id])}
-                            >
-                              <Trash2 className="h-4 w-4" />
-                            </Button>
+                            {papelera ? (
+                              esAdmin && (
+                                <Button variant="ghost" size="icon" aria-label={`Restaurar ${c.email}`}
+                                  title="Restaurar contacto"
+                                  onClick={() => restaurarIndividual.mutate(c.id)}>
+                                  <Undo2 className="h-4 w-4" />
+                                </Button>
+                              )
+                            ) : (
+                              <>
+                                <Button variant="ghost" size="icon" asChild aria-label="Ver detalle">
+                                  <Link href={`/panel/contactos/${c.id}`}><Eye className="h-4 w-4" /></Link>
+                                </Button>
+                                {esAdmin && (
+                                  <Button
+                                    variant="ghost" size="icon" aria-label={`Eliminar ${c.email}`}
+                                    className="text-red-600 hover:text-red-700"
+                                    onClick={() => setIdsAEliminar([c.id])}
+                                  >
+                                    <Trash2 className="h-4 w-4" />
+                                  </Button>
+                                )}
+                              </>
+                            )}
                           </div>
                         </TableCell>
                       </TableRow>
@@ -245,10 +407,9 @@ export default function ContactosPage() {
                 : `¿Eliminar ${idsAEliminar?.length ?? 0} contacto(s)?`}
             </AlertDialogTitle>
             <AlertDialogDescription>
-              Puedes <b>eliminarlos definitivamente</b> (borra también su historial de envíos;
-              las supresiones y la auditoría se conservan)
+              Puedes <b>eliminarlos</b> (pasan a la <b>papelera</b>: conservan su historial
+              y un administrador puede restaurarlos; las importaciones no los reactivan)
               o <b>darlos de baja</b> (quedan en supresión y nunca recibirán campañas).
-              Esta acción no se puede deshacer.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter className="flex-col sm:flex-row gap-2">
@@ -260,12 +421,140 @@ export default function ContactosPage() {
             </Button>
             <AlertDialogAction className="bg-red-600 hover:bg-red-700"
               onClick={(e) => { e.preventDefault(); borrarMasivo.mutate("eliminar"); }}>
-              <Trash2 className="mr-1.5 h-4 w-4" /> Eliminar definitivamente
+              <Trash2 className="mr-1.5 h-4 w-4" /> Eliminar (papelera)
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* Confirmación de eliminación filtrada */}
+      <AlertDialog open={aEliminarFiltrados} onOpenChange={setAEliminarFiltrados}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>¿Eliminar todos los contactos filtrados?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Se <b>papelera</b> todo contacto que coincida con los filtros actuales
+              (búsqueda, estado y lista). Es una operación en segundo plano con
+              progreso y cancelación; los datos se conservan y es restaurable.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancelar</AlertDialogCancel>
+            <AlertDialogAction className="bg-red-600 hover:bg-red-700"
+              disabled={eliminarFiltrados.isPending}
+              onClick={(e) => { e.preventDefault(); eliminarFiltrados.mutate(); }}>
+              <Trash2 className="mr-1.5 h-4 w-4" /> Eliminar filtrados
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Vaciado global con confirmación reforzada */}
+      <VaciarTodoDialog
+        abierto={vaciarAbierto}
+        onCerrar={() => setVaciarAbierto(false)}
+        onLanzada={(id) => { setOpId(id); invalidar(); }}
+      />
     </div>
+  );
+}
+
+function VaciarTodoDialog({ abierto, onCerrar, onLanzada }: {
+  abierto: boolean; onCerrar: () => void; onLanzada: (opId: string) => void;
+}) {
+  const [frase, setFrase] = useState("");
+  const qc = useQueryClient();
+
+  // Preview con react-query (sin efectos con setState: lint react-hooks)
+  const { data: preview } = useQuery({
+    queryKey: ["vaciar-todo-preview"],
+    queryFn: () => api.get<{
+      contactos_activos: number; en_papelera: number;
+      campanas_activas: number; importaciones_en_curso: number;
+    }>("/api/v1/contacts/vaciar-todo/preview"),
+    enabled: abierto,
+    staleTime: 0,
+  });
+
+  const vaciar = useMutation({
+    mutationFn: () => api.post<BulkOperation>("/api/v1/contacts/vaciar-todo", {
+      confirmar: true, confirmar_texto: frase.trim(),
+    }),
+    onSuccess: (res) => {
+      toast.info(`Vaciado en cola: ${numero(res.total_objetivo)} contacto(s) en proceso`);
+      qc.invalidateQueries({ queryKey: ["contactos"] });
+      onLanzada(res.id);
+      onCerrar();
+    },
+    onError: (e: Error) => toast.error(e.message),
+  });
+
+  const fraseCorrecta = frase.trim() === "VACIAR CONTACTOS";
+  const hayIncompatibles = !!preview && (preview.campanas_activas > 0 || preview.importaciones_en_curso > 0);
+  const activos = preview?.contactos_activos ?? 0;
+
+  return (
+    <Dialog open={abierto} onOpenChange={(v) => { if (!v) { setFrase(""); onCerrar(); } }}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2 text-red-600">
+            <AlertTriangle className="h-5 w-5" /> Vaciar todos los contactos
+          </DialogTitle>
+          <DialogDescription>
+            Operación administrativa de alto impacto. Escribe la frase exacta para confirmar.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-3 text-sm">
+          {preview ? (
+            <div className="grid grid-cols-2 gap-2">
+              <div className="rounded-lg bg-muted/60 p-2.5">
+                <p className="text-muted-foreground text-xs">Contactos activos afectados</p>
+                <p className="font-bold text-lg tabular-nums">{numero(preview.contactos_activos)}</p>
+              </div>
+              <div className="rounded-lg bg-muted/60 p-2.5">
+                <p className="text-muted-foreground text-xs">Ya en papelera</p>
+                <p className="font-bold text-lg tabular-nums">{numero(preview.en_papelera)}</p>
+              </div>
+            </div>
+          ) : (
+            <Skeleton className="h-16" />
+          )}
+          {hayIncompatibles && (
+            <p className="rounded-lg bg-amber-500/10 border border-amber-500/40 p-2 text-xs text-amber-700">
+              Atención: hay {preview?.campanas_activas ?? 0} campaña(s) activa(s) y{" "}
+              {preview?.importaciones_en_curso ?? 0} importación(es) en curso.
+              Las campañas ya encoladas seguirán enviando (sus destinatarios ya están
+              materializados); valora esperar o cancelarlas primero.
+            </p>
+          )}
+
+          <p className="text-muted-foreground text-xs">
+            El vaciado es un <b>borrado lógico</b>: los contactos pasan a la papelera y
+            pueden restaurarse. Supresiones, bajas, consentimientos, mensajes y eventos
+            SES se conservan íntegros.
+          </p>
+
+          <div className="space-y-1.5">
+            <Label htmlFor="frase-vaciar">
+              Escribe <b>VACIAR CONTACTOS</b> para habilitar el botón
+            </Label>
+            <Input id="frase-vaciar" value={frase} onChange={(e) => setFrase(e.target.value)}
+              placeholder="VACIAR CONTACTOS" autoComplete="off" />
+          </div>
+        </div>
+
+        <DialogFooter>
+          <Button variant="outline" onClick={onCerrar}>Cancelar</Button>
+          <Button className="bg-red-600 hover:bg-red-700"
+            disabled={!fraseCorrecta || !preview || activos === 0 || vaciar.isPending}
+            onClick={() => vaciar.mutate()}>
+            {vaciar.isPending && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+            <Trash2 className="mr-2 h-4 w-4" /> Vaciar todos los contactos
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
