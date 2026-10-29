@@ -5,6 +5,34 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y 
 
 ## [Sin publicar]
 
+### Integración de hotfixes de producción (V4 + parche local VPS)
+
+- **Conteo eficiente de destinatarios** (`api/v1/campaigns.py`, `services/campaigns.py`):
+  `recipients-preview` y `recipients-estimate` usan `count_recipients()` (COUNT en SQL);
+  con 50k+ contactos ya NO se materializa la lista en memoria. Reglas de elegibilidad
+  centralizadas en `_recipients_query()`: select y count nunca divergen. La exclusión de
+  supresiones de campañas promocionales pasa a NOT EXISTS correlacionado en SQL, inmune a
+  mayúsculas heredadas (`Suppression.email == lower(Contact.email)`, índice utilizable).
+- **Seguridad SNS** (`services/events.py`):
+  - Certificados de firma solo desde `sns.<región>.amazonaws.com` (antes: cualquier
+    `*.amazonaws.com` — buckets S3 de terceros incluidos; vector SSRF/arbitrario).
+  - Cadena canónica según la ESPECIFICACIÓN oficial de AWS (cada campo es
+    `clave\nvalor\n`): la implementación anterior (solo valores) firmaba un mensaje
+    que no corresponde al formato de SNS.
+  - `Subject` opcional incluido en la firma solo cuando está presente (orden oficial).
+  - Certificados PEM y DER (SNS publica PEM; antes solo DER y la verificación real
+    habría fallado siempre).
+- **`ses_configured()` sin AWS** (`services/ses.py`): credenciales explícitas o cadena
+  de Boto3 con caché de proceso 60 s; 0 llamadas AWS por mensaje y sin dependencia de
+  Redis para esta comprobación (la validez/permisos se verifican al enviar y en el
+  diagnóstico de cuota).
+- **Consumidor SQS dedicado** (`workers/worker.py`, `workers/events_worker.py`,
+  `docker-compose.yml`): los workers de envío ya no arrancan consumidores SQS salvo
+  `HJ_SQS_IN_SEND_WORKER=1`; el pipeline SES→SNS→SQS lo procesa el servicio
+  `events-worker` (único consumidor, healthcheck por latido `sqs_consumer`, inactivo y
+  visible si la cola no está configurada). Escalar a N workers ya no multiplica
+  consumidores ni enmascara caídas en el latido. Idempotencia `event_uid` intacta.
+
 ### Corregido
 
 - **Auditoría V4 — envíos bajo control global (rate limiter fail-closed)**:
