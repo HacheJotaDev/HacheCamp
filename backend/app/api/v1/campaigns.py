@@ -96,8 +96,9 @@ def recipients_preview(payload: RecipientsPreview, db: Session = Depends(get_db)
         name="preview", subject="preview", from_name="preview", from_email="preview@local",
         category=payload.category, list_id=payload.list_id, segment_id=payload.segment_id,
     )
-    recipients = campaign_service.select_recipients(db, probe)
-    return RecipientsEstimate(destinatarios=len(recipients))
+    # COUNT en SQL: con 50k+ contactos NO se materializa la lista en memoria
+    total = campaign_service.count_recipients(db, probe)
+    return RecipientsEstimate(destinatarios=total)
 
 
 @router.get("/queue/active", response_model=dict)
@@ -537,8 +538,9 @@ def cancel(campaign_id: str, request: Request, db: Session = Depends(get_db),
 def recipients_estimate(campaign_id: str, db: Session = Depends(get_db),
                         user: User = Depends(get_current_user)):
     campaign = _get_campaign(db, campaign_id)
-    recipients = campaign_service.select_recipients(db, campaign)
-    return RecipientsEstimate(destinatarios=len(recipients))
+    # COUNT en SQL (mismas reglas de elegibilidad que el envío real)
+    total = campaign_service.count_recipients(db, campaign)
+    return RecipientsEstimate(destinatarios=total)
 
 
 # Seguimiento ------------------------------------------------------------------- #

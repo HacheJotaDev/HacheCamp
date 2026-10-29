@@ -18,10 +18,10 @@ from app.models import (
     CampaignMessage,
     Contact,
     Segment,
+    Suppression,
     contact_lists_rel,
 )
 from app.services import queue as send_queue
-from app.services import contacts as contact_service
 from app.services.contacts import normalize_email
 from app.services.renderer import html_to_plain_text, wrap_plain_with_unsubscribe
 
@@ -59,12 +59,22 @@ def add_history(campaign: Campaign, action: str, *, user_id: Optional[str] = Non
     ))
 
 
-def select_recipients(db: Session, campaign: Campaign) -> List[Contact]:
-    """Selecciona destinatarios según lista o segmento, con consentimiento válido
-    para campañas promocionales y sin supresión.
+def _recipients_query(db: Session, campaign: Campaign):
+    """Consulta base de destinatarios elegibles (única fuente de verdad).
 
-    La supresión se resuelve en UNA consulta (set de correos suprimidos) y no
-    con una consulta por contacto: con 50k destinatarios eran 50k+ SELECT.
+    La usan select_recipients, count_recipients y cualquier estimación: así
+    las reglas de elegibilidad NO pueden divergir entre 'seleccionar' y
+    'contar' (antes el conteo del panel materializaba toda la lista).
+
+    Reglas aplicadas:
+    - Estado 'suscripto' (consentimiento vigente) para TODAS las categorías.
+    - Pertenencia a lista o filtros de segmento cuando aplique.
+    - Campañas promocionales: excluye suprimidos con NOT EXISTS correlacionado
+      en SQL (la exclusión la hace la BD, sin cargar 50k filas en memoria).
+      Suppression.email se almacena siempre normalizado (suppress_email usa
+      normalize_email); se compara contra lower(Contact.email) para ser
+      inmune a contactos heredados con mayúsculas, y al no transformar la
+      columna de Suppression el índice único de email sigue utilizable.
     """
     query = db.query(Contact).filter(Contact.status == "suscripto")
 
@@ -99,14 +109,28 @@ def select_recipients(db: Session, campaign: Campaign) -> List[Contact]:
                 else:  # contiene
                     query = query.filter(col.like(f"%{value}%"))
 
-    recipients = query.all()
-    # Filtro de supresión y consentimiento para campañas promocionales
     if campaign.category == "promocional":
-        suprimidos = contact_service.emails_suprimidos(db, [c.email for c in recipients])
-        recipients = [c for c in recipients if c.email not in suprimidos]
-    else:
-        recipients = [c for c in recipients if c.status == "suscripto"]
-    return recipients
+        query = query.filter(
+            ~db.query(Suppression.id)
+            .filter(Suppression.email == func.lower(Contact.email))
+            .exists()
+        )
+    return query
+
+
+def select_recipients(db: Session, campaign: Campaign) -> List[Contact]:
+    """Selecciona destinatarios (mismas reglas que count_recipients)."""
+    return _recipients_query(db, campaign).all()
+
+
+def count_recipients(db: Session, campaign: Campaign) -> int:
+    """Cuenta destinatarios en SQL (COUNT *): nunca materializa la lista.
+
+    Los endpoints de estimación/preview con 50k+ contactos pasaron de cargar
+    todas las filas y filtrar en Python a un único COUNT con la exclusión de
+    supresiones dentro de la propia consulta.
+    """
+    return int(_recipients_query(db, campaign).count())
 
 
 def enqueue_campaign(db: Session, campaign: Campaign) -> Dict[str, Any]:
