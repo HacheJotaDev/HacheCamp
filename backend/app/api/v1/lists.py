@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core import security
@@ -100,14 +101,14 @@ def update_list(list_id: str, payload: ListCreate, db: Session = Depends(get_db)
     lst = db.get(ContactList, list_id)
     if not lst or lst.deleted_at is not None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Lista no encontrada")
-    colision = (
-        db.query(ContactList)
-        .filter(ContactList.name == payload.name, ContactList.id != lst.id,
-                ContactList.deleted_at.is_(None))
-        .first()
-    )
+    # Igual que en la creación: el nombre queda reservado también por las
+    # listas de la PAPELERA (UNIQUE en BD); renombrar a un nombre en papelera
+    # bloquearía después la restauración de esa otra lista.
+    colision = list_service.nombre_en_uso(db, payload.name, exclude_id=lst.id)
     if colision:
-        raise HTTPException(status.HTTP_409_CONFLICT, "Ya existe una lista con ese nombre")
+        estado = "está en la papelera" if colision.deleted_at is not None else "ya existe"
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            f"Ya {estado} una lista con ese nombre")
     lst.name = payload.name
     lst.description = payload.description
     db.commit()
@@ -172,21 +173,40 @@ def delete_list(list_id: str, request: Request, db: Session = Depends(get_db),
 
 @router.post("/lists/{list_id}/restore", response_model=dict)
 def restore_list(list_id: str, request: Request, db: Session = Depends(get_db),
-                 user: User = Depends(require_admin)):
-    """Restaura una lista desde la papelera (requiere admin)."""
+                 user: User = Depends(require_admin), payload: Optional[dict] = None):
+    """Restaura una lista desde la papelera (requiere admin).
+
+    Si otra lista tomó su nombre mientras estaba eliminada (el nombre es
+    UNIQUE), la restauración exige un nombre nuevo: cuerpo opcional
+    {"nuevo_nombre": "..."}; sin él se responde 409 con el mensaje accionable.
+    """
     lst = db.get(ContactList, list_id)
     if not lst:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Lista no encontrada")
+    nuevo = None
+    if isinstance(payload, dict):
+        candidato = payload.get("nuevo_nombre")
+        if candidato is not None:
+            nuevo = str(candidato)
     try:
-        list_service.restore_list(db, lst)
+        nombre_final = list_service.restore_list(db, lst, nuevo_nombre=nuevo)
+        db.commit()
     except list_service.ListError as exc:
         db.rollback()
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc))
-    db.commit()
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc))
+    except IntegrityError:
+        # Carrera: otra petición restauró/renombró con el mismo nombre entre
+        # nuestra comprobación y el commit (UNIQUE de BD). Nunca un 500.
+        db.rollback()
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Otra operación acaba de usar ese nombre: reintenta con uno distinto",
+        )
     audit(db, "lista_restaurada", user_id=user.id, user_email=user.email,
-          entity_type="list", entity_id=lst.id, ip=security.client_ip(request))
+          entity_type="list", entity_id=lst.id,
+          detail={"nombre_final": nombre_final}, ip=security.client_ip(request))
     db.commit()
-    return {"id": lst.id, "restaurada": True}
+    return {"id": lst.id, "restaurada": True, "nombre": nombre_final}
 
 
 # --------------------------------------------------------------------------- #

@@ -19,7 +19,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core.db import utcnow
-from app.models import Campaign, Contact, contact_lists_rel
+from app.models import Campaign, ContactList, contact_lists_rel
 
 LOTE = 5000  # asociaciones por lote (commit corto: 50.656 filas sin bloquear)
 
@@ -54,6 +54,20 @@ def _proteger(db: Session, list_id: str, accion: str) -> None:
         )
 
 
+def nombre_en_uso(db: Session, name: str, *, exclude_id: str | None = None) -> ContactList | None:
+    """Lista (ACTIVA o en papelera) que ya reserva ese nombre.
+
+    El nombre tiene restricción UNIQUE en BD (contact_lists.name): tanto las
+    listas activas como las de la papelera reservan el nombre, así que crear,
+    renombrar o restaurar debe comprobar AMBOS poblados. Devuelve la lista
+    conflictiva o None.
+    """
+    query = db.query(ContactList).filter(ContactList.name == name)
+    if exclude_id:
+        query = query.filter(ContactList.id != exclude_id)
+    return query.first()
+
+
 def soft_delete_list(db: Session, lst, *, user_id=None, user_email=None) -> None:
     if lst.deleted_at is not None:
         raise ListError("La lista ya está en la papelera")
@@ -62,13 +76,48 @@ def soft_delete_list(db: Session, lst, *, user_id=None, user_email=None) -> None
     lst.deleted_by = user_id
 
 
-def restore_list(db: Session, lst) -> None:
+def restore_list(db: Session, lst, *, nuevo_nombre: str | None = None) -> str:
+    """Restaura una lista desde la papelera gestionando la COLISIÓN de nombres.
+
+    Entre el borrado y la restauración el nombre puede haber quedado
+    reservado (p. ej. otra lista renombrada con ese nombre; el nombre es
+    UNIQUE en BD). Reglas:
+    - Sin colisión: se restaura con su nombre original.
+    - Con colisión y `nuevo_nombre`: se valida (activo y papelera, excluyendo
+      esta misma fila) y se restaura RENOMBRADA (nunca se pierde la lista ni
+      su población de asociaciones).
+    - Con colisión y sin `nuevo_nombre`: ListError con mensaje accionable
+      (el API responde 409 y el frontend ofrece renombrar en el diálogo).
+    Devuelve el nombre definitivo con el que queda la lista.
+    """
     if lst.deleted_at is None:
         raise ListError("La lista no está en la papelera")
-    # Si entre medias otra lista tomó el nombre (unique), no se puede restaurar
-    # con el mismo nombre: el API lo informa para renombrar manualmente.
+
+    colision = nombre_en_uso(db, lst.name, exclude_id=lst.id)
+    if colision is None:
+        lst.deleted_at = None
+        lst.deleted_by = None
+        return lst.name
+
+    # Colisión: obligatorio un nombre alternativo válido
+    candidato = (nuevo_nombre or "").strip()
+    if not candidato:
+        raise ListError(
+            f"No se puede restaurar con el nombre «{lst.name}»: otra lista lo "
+            "está usando ya. Indica un nombre nuevo para restaurarla."
+        )
+    if candidato == lst.name:
+        raise ListError("El nombre indicado es el mismo que tiene la lista en la papelera")
+    ocupado = nombre_en_uso(db, candidato, exclude_id=lst.id)
+    if ocupado is not None:
+        estado = "en la papelera" if ocupado.deleted_at is not None else "activa"
+        raise ListError(
+            f"Ya existe una lista {estado} con el nombre «{candidato}»"
+        )
+    lst.name = candidato
     lst.deleted_at = None
     lst.deleted_by = None
+    return lst.name
 
 
 def empty_list(db: Session, lst, *, user_id=None, user_email=None) -> Dict[str, Any]:

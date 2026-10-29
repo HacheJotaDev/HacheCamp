@@ -18,6 +18,9 @@ import {
   AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 import {
+  Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle,
+} from "@/components/ui/dialog";
+import {
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
@@ -37,6 +40,11 @@ export default function ListasPage() {
   const [editNombre, setEditNombre] = useState("");
   const [editDesc, setEditDesc] = useState("");
   const [aVaciar, setAVaciar] = useState<ContactList | null>(null);
+  // Conflicto de nombre al restaurar: guarda la lista en espera y el nombre
+  // propuesto para el diálogo de renombrado (el nombre es UNIQUE en BD).
+  const [conflictoRestaurar, setConflictoRestaurar] = useState<
+    { id: string; nombre: string; error?: string } | null
+  >(null);
   const [segNombre, setSegNombre] = useState("");
   const [segCampo, setSegCampo] = useState("email");
   const [segOp, setSegOp] = useState("contiene");
@@ -97,13 +105,26 @@ export default function ListasPage() {
     onError: (e: Error) => toast.error(e.message),
   });
 
+  // Restauración desde la papelera. Si otra lista tomó el nombre mientras
+  // estaba eliminada, el API responde 409 y aquí se pide un nombre nuevo
+  // (restauración renombrada; la lista y sus contactos nunca se pierden).
   const restaurarLista = useMutation({
-    mutationFn: (id: string) => api.post(`/api/v1/lists/${id}/restore`),
-    onSuccess: () => {
-      toast.success("Lista restaurada");
+    mutationFn: ({ id, nuevoNombre }: { id: string; nuevoNombre?: string }) =>
+      api.post<{ nombre: string }>(`/api/v1/lists/${id}/restore`,
+        nuevoNombre ? { nuevo_nombre: nuevoNombre } : undefined),
+    onSuccess: (d) => {
+      toast.success(d?.nombre && d.nombre !== "" ? `Lista restaurada como «${d.nombre}»` : "Lista restaurada");
+      setConflictoRestaurar(null);
       invalidar();
     },
-    onError: (e: Error) => toast.error(e.message),
+    onError: (e: Error) => {
+      // 409 por colisión: se abre el diálogo de renombrado (sin toast)
+      if (e.message.includes("Indica un nombre nuevo") || e.message.includes("Ya existe una lista")) {
+        setConflictoRestaurar((prev) => (prev ? { ...prev, error: e.message } : prev));
+        return;
+      }
+      toast.error(e.message);
+    },
   });
 
   const crearSegmento = useMutation({
@@ -253,7 +274,12 @@ export default function ListasPage() {
                     {papelera ? (
                       esAdmin && (
                         <Button size="icon" variant="ghost" title="Restaurar lista"
-                          onClick={() => restaurarLista.mutate(l.id)}>
+                          onClick={() => {
+                            // Sembramos el diálogo con el nombre actual: si el
+                            // API responde 409 (nombre tomado) se pide uno nuevo.
+                            setConflictoRestaurar({ id: l.id, nombre: l.name });
+                            restaurarLista.mutate({ id: l.id });
+                          }}>
                           <Undo2 className="h-4 w-4" />
                         </Button>
                       )
@@ -411,6 +437,47 @@ export default function ListasPage() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* Conflicto de nombre al restaurar: la lista se restaura RENOMBRADA.
+          Solo se abre con error (409): un clic sin colisión no muestra nada. */}
+      <Dialog open={!!conflictoRestaurar?.error}
+        onOpenChange={(v) => !v && setConflictoRestaurar(null)}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Nombre en uso: elige otro para restaurar</DialogTitle>
+            <DialogDescription>
+              {conflictoRestaurar?.error ||
+                `Otra lista ya usa el nombre «${conflictoRestaurar?.nombre}». Indica un nombre distinto: la lista se restaurará renombrada, sin perder sus contactos.`}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-1.5">
+            <Label htmlFor="r-nuevo-nombre">Nuevo nombre</Label>
+            <Input id="r-nuevo-nombre" autoFocus
+              value={conflictoRestaurar?.nombre ?? ""}
+              onChange={(e) => conflictoRestaurar &&
+                setConflictoRestaurar({ ...conflictoRestaurar, nombre: e.target.value, error: undefined })}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && conflictoRestaurar && conflictoRestaurar.nombre.trim().length >= 2) {
+                  restaurarLista.mutate({
+                    id: conflictoRestaurar.id, nuevoNombre: conflictoRestaurar.nombre.trim(),
+                  });
+                }
+              }}
+              placeholder="p. ej. Clientes activos (restaurada)" />
+          </div>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => setConflictoRestaurar(null)}>Cancelar</Button>
+            <Button className="bg-emerald-600 hover:bg-emerald-700"
+              disabled={!conflictoRestaurar || conflictoRestaurar.nombre.trim().length < 2 || restaurarLista.isPending}
+              onClick={() => conflictoRestaurar && restaurarLista.mutate({
+                id: conflictoRestaurar.id, nuevoNombre: conflictoRestaurar.nombre.trim(),
+              })}>
+              {restaurarLista.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Undo2 className="mr-2 h-4 w-4" />}
+              Restaurar con este nombre
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }
