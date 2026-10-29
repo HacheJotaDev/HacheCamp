@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, List, Optional
 
 from app.core.config import settings
 from app.workers.redis_client import get_redis
@@ -145,22 +145,31 @@ def import_queue_count() -> int:
 # WATCH/MULTI, que ante WatchError dejaba pasar envíos sin slot.
 # --------------------------------------------------------------------------- #
 
-# Toma un slot de forma atómica. ARGV: [now_ns, intervalo_ns].
+# Toma un slot de forma atómica. ARGV: [intervalo_ns].
 # Devuelve los segundos de espera como cadena ("0" si el slot es nuestro).
+# LA HORA SE TOMA DENTRO DEL SCRIPT (redis.call('TIME')): si cada cliente
+# capturase su propio time_ns() antes del EVAL, un hilo desplanzado llega con
+# un timestamp ANTIGUO, la rama "reloj retrocedido" disparaba y concedía el
+# slot sin esperar (hallazgo del cierre V5 contra Redis real: 4 pruebas de
+# concurrencia fallaban solo con redis-server real; fakeredis serializa en
+# proceso y no reproducía la ventana). Con la hora del servidor la lectura es
+# atómica respecto al SET y no existe ventana. Además la espera se devuelve
+# con tostring(): Redis trunca a ENTERO los números que devuelve Lua.
 _SLOT_LUA = """
+local t = redis.call('TIME')
+local now = t[1] * 1000000000 + t[2] * 1000
 local last = tonumber(redis.call('GET', KEYS[1]) or '0')
-local now = tonumber(ARGV[1])
-local interval = tonumber(ARGV[2])
+local interval = tonumber(ARGV[1])
 if last > now then
-  -- Reloj retrocedido: reiniciamos la referencia para no bloquear
-  redis.call('SET', KEYS[1], ARGV[1])
+  -- Reloj retrocedido de verdad (NTP): reiniciamos la referencia
+  redis.call('SET', KEYS[1], tostring(now))
   return '0'
 end
 local next_allowed = last + interval
 if now < next_allowed then
   return tostring((next_allowed - now) / 1e9)
 end
-redis.call('SET', KEYS[1], ARGV[1])
+redis.call('SET', KEYS[1], tostring(now))
 return '0'
 """
 
@@ -172,7 +181,7 @@ def _tomar_slot(r: Any, intervalo_ns: int) -> float:
     cualquier Redis, incluido fakeredis en pruebas. A 5-14 envíos/s el coste
     de reenviar el script es trivial.
     """
-    resultado = r.eval(_SLOT_LUA, 1, LAST_SEND_KEY, time.time_ns(), intervalo_ns)
+    resultado = r.eval(_SLOT_LUA, 1, LAST_SEND_KEY, intervalo_ns)
     if isinstance(resultado, (bytes, bytearray)):
         resultado = resultado.decode()
     return float(resultado or 0)
