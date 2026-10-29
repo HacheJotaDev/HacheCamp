@@ -116,6 +116,17 @@ def process_one(db, mid: str) -> Dict[str, Any]:
     if msg.status not in ("pendiente", "incierto", "rebote_temporal"):
         return {"accion": "omitido", "motivo": f"estado_{msg.status}"}
 
+    # V5: contacto en la PAPELERA -> un mensaje PENDIENTE no sale. Solo se
+    # toca lo pendiente: lo ya aceptado/entregado/incierto se respeta (nada
+    # aceptado por SES se anula ni se reenvía). Un mensaje en reintento
+    # (incierto/rebote_temporal) sí pudo salir: se deja para reconciliación.
+    if msg.status == "pendiente":
+        contacto = db.get(Contact, msg.contact_id)
+        if contacto is not None and contacto.deleted_at is not None:
+            msg.status = "cancelado"
+            msg.last_error = "Contacto en la papelera al procesar el envío"
+            return {"accion": "cancelado", "motivo": "contacto_en_papelera"}
+
     # Supresión: bloqueo de nuevos envíos a contactos suprimidos
     if contact_service.is_suppressed(db, msg.email):
         msg.status = "cancelado"
@@ -311,6 +322,11 @@ def run_forever(poll_interval: int = 5) -> None:
             db = SessionLocal()
             try:
                 result = process_one(db, mid)
+                # Persistir TAMBIÉN los retornos anticipados de process_one
+                # (cancelaciones por campaña cancelada/papelera/supresión):
+                # sin este commit, db.close() descartaría el cambio con un
+                # rollback silencioso y el mensaje volvería a 'pendiente'.
+                db.commit()
                 if result.get("accion") == "reencolado":
                     time.sleep(min(result.get("espera", 30), 30))
                 logger.info("Trabajo procesado", extra={"resultado": json.dumps(result)[:400]})

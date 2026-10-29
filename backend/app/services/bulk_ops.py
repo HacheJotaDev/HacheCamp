@@ -30,7 +30,6 @@ from app.models import (
     BulkOperation,
     CampaignMessage,
     Contact,
-    Tag,
     contact_lists_rel,
     contact_tags_rel,
 )
@@ -235,7 +234,7 @@ def _lotes_para_purgar(db: Session, cutoff, *, suprimir: bool = False):
     suprimir=True añade los correos a la lista de supresión (razón «purga»)
     para que una importación antigua no los vuelva a crear como suscriptos.
     """
-    from app.models import ConsentEvent, Suppression  # importación tardía
+    from app.models import ConsentEvent  # importación tardía
     from app.services.contacts import normalize_email, suppress_email
     while True:
         con_mensajes = (
@@ -331,7 +330,10 @@ def process_operation(db: Session, op_id: str) -> Dict[str, Any]:
                 db2.commit()
             for borrados in _lotes_para_purgar(db2, cutoff,
                                                suprimir=bool(criterios.get("suprimir"))):
-                op = db2.get(BulkOperation, op.id)
+                # refresh OBLIGATORIO: la sesión usa expire_on_commit=False y
+                # db2.get devolvería la copia cacheada sin ver la cancelación
+                # pedida por otra sesión (el API). import_jobs hace lo mismo.
+                db2.refresh(op)
                 if op.cancel_requested:
                     op.status = "cancelada_parcial" if op.afectados else "cancelada"
                     op.finished_at = utcnow()
@@ -345,8 +347,30 @@ def process_operation(db: Session, op_id: str) -> Dict[str, Any]:
                 filtros: Dict[str, Any] = {}
             elif op.tipo == "eliminar_filtro":
                 filtros = {k: criterios.get(k) for k in ("q", "estado", "list_id", "tag_id")}
-            else:  # eliminar_ids se procesa en línea (≤1000, un UPDATE)
-                filtros = {}
+            else:  # eliminar_ids: SOLO sus ids explícitos (defensa en profundidad)
+                ids = [str(x) for x in (criterios.get("ids") or [])][:5000]
+                op.total_objetivo = len(ids)
+                db2.commit()
+                if ids:
+                    actualizados = (
+                        db2.query(Contact)
+                        .filter(Contact.id.in_(ids), Contact.deleted_at.is_(None))
+                        .update({"deleted_at": utcnow(), "deleted_by": op.user_id,
+                                 "deleted_by_operation": op.id}, synchronize_session=False)
+                    )
+                    op.procesados = len(ids)
+                    op.afectados = int(actualizados or 0)
+                    op.omitidos = len(ids) - op.afectados
+                    db2.commit()
+                op = db2.get(BulkOperation, op.id)
+                # Terminal SIEMPRE: el trabajo en línea ya acabó; una
+                # cancelación pedida a estas alturas llegó tarde (sin efecto).
+                db2.refresh(op)
+                op.status = "completada"
+                op.finished_at = utcnow()
+                db2.commit()
+                return {"accion": "completada", "afectados": op.afectados,
+                        "omitidos": op.omitidos}
             # `hasta`: congela el objetivo en los contactos existentes al inicio
             hasta = op.started_at
             # Objetivo total (una sola vez; con offset-0 el conteo de ACTIVOS
@@ -355,7 +379,10 @@ def process_operation(db: Session, op_id: str) -> Dict[str, Any]:
                 op.total_objetivo = _count_activos(db2, filtros, hasta=hasta)
                 db2.commit()
             for lote in _lotes_activos(db2, filtros, hasta=hasta):
-                op = db2.get(BulkOperation, op.id)
+                # refresh OBLIGATORIO: la sesión usa expire_on_commit=False y
+                # db2.get devolvería la copia cacheada sin ver la cancelación
+                # pedida por otra sesión (el API). import_jobs hace lo mismo.
+                db2.refresh(op)
                 if op.cancel_requested:
                     op.status = "cancelada_parcial" if op.afectados else "cancelada"
                     op.finished_at = utcnow()
@@ -367,10 +394,16 @@ def process_operation(db: Session, op_id: str) -> Dict[str, Any]:
                 db2.commit()
 
         op = db2.get(BulkOperation, op.id)
-        if not op.cancel_requested:
-            op.status = "completada"
-            op.finished_at = utcnow()
-            db2.commit()
+        # Terminal SIEMPRE: la cancelación se evalúa al INICIO de cada lote;
+        # si llegamos aquí el objetivo ya se procesó por completo (el flag
+        # llegó tarde, durante el último lote). Dejar 'procesando' con el flag
+        # activo dejaría la operación huérfana: el estado honesto es
+        # 'completada' con procesados == total_objetivo, y cancel_requested
+        # queda registrado para la auditoría.
+        db2.refresh(op)
+        op.status = "completada"
+        op.finished_at = utcnow()
+        db2.commit()
         return {"accion": "completada", "afectados": op.afectados, "omitidos": op.omitidos}
     except Exception as exc:
         if db2 is not None:
