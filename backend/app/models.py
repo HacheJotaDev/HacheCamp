@@ -83,6 +83,10 @@ class ContactList(Base):
     name: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, nullable=False)
+    # V5: borrado lógico (la fila se conserva; las asociaciones intactas para
+    # poder restaurar sin perder población histórica de campañas finalizadas).
+    deleted_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime, nullable=True, index=True)
+    deleted_by: Mapped[Optional[str]] = mapped_column(GUID, nullable=True)
 
     contacts: Mapped[List["Contact"]] = relationship(
         secondary="contact_lists_rel", back_populates="lists", viewonly=True
@@ -117,6 +121,13 @@ class Contact(Base):
     source: Mapped[Optional[str]] = mapped_column(String(60), nullable=True)  # manual|csv_import|api
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow, nullable=False)
+    # V5: borrado lógico. Nada se borra físicamente salvo purga explícita con
+    # autorización separada; el historial de consentimiento SIEMPRE se conserva.
+    deleted_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime, nullable=True, index=True)
+    deleted_by: Mapped[Optional[str]] = mapped_column(GUID, nullable=True)
+    # Operación masiva (BulkOperation) que lo eliminó: permite restaurar con
+    # precisión todo un lote sin recalcular filtros.
+    deleted_by_operation: Mapped[Optional[str]] = mapped_column(GUID, nullable=True, index=True)
 
     lists: Mapped[List["ContactList"]] = relationship(
         secondary="contact_lists_rel", back_populates="contacts", viewonly=True
@@ -261,6 +272,12 @@ class Campaign(Base):
     created_by: Mapped[Optional[str]] = mapped_column(GUID, nullable=True)
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow, nullable=False)
+    # V5: papelera (borrado lógico) y archivo. deleted_at => desaparece de la
+    # lista principal y aparece en la Papelera; restore recupera todo el
+    # historial (mensajes, eventos SES e historial NUNCA se tocan).
+    deleted_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime, nullable=True, index=True)
+    deleted_by: Mapped[Optional[str]] = mapped_column(GUID, nullable=True)
+    archived_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime, nullable=True, index=True)
 
     messages: Mapped[List["CampaignMessage"]] = relationship(back_populates="campaign")
     history: Mapped[List["CampaignHistory"]] = relationship(
@@ -406,6 +423,57 @@ class ImportJobData(Base):
     job_id: Mapped[str] = mapped_column(GUID, ForeignKey("import_jobs.id", ondelete="CASCADE"), primary_key=True)
     payload: Mapped[str] = mapped_column(Text, nullable=False)  # JSON: lista de filas {"email", "first_name", ...}
     created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, nullable=False)
+
+
+# ----------------------------------------------------------------------------- #
+# Operaciones masivas (V5): eliminación/vaciado de contactos por lotes
+# ----------------------------------------------------------------------------- #
+
+BULK_STATES = ["pendiente", "procesando", "completada", "fallida", "cancelada", "cancelada_parcial"]
+
+
+class BulkOperation(Base):
+    """Operación administrativa masiva sobre contactos (V5).
+
+    Tipos:
+    - eliminar_ids:        borrado lógico de una lista explícita de IDs.
+    - eliminar_filtro:     borrado lógico según filtros (q/estado/lista/etiqueta).
+    - vaciar_todo:         borrado lógico de TODOS los contactos activos.
+    - purgar:              borrado FÍSICO de contactos ya borrados lógicamente
+                           (requiere autorización separada; omite contactos con
+                           mensajes de campaña para no destruir estadísticas).
+
+    El progreso se persiste aquí (patrón ImportJob): el frontend sondea esta
+    fila sin bloquear, los lotes hacen commits cortos y el worker puede
+    reanudar tras un reinicio desde procesados.
+    """
+    __tablename__ = "bulk_operations"
+
+    id: Mapped[str] = mapped_column(GUID, primary_key=True, default=new_id)
+    tipo: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(20), default="pendiente", nullable=False, index=True)
+
+    # Criterios (JSON): ids, q, estado, list_id, tag_id, confirmaciones…
+    criterios: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
+
+    # Progreso (persistente)
+    total_objetivo: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    procesados: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    afectados: Mapped[int] = mapped_column(Integer, default=0, nullable=False)   # eliminados/suprimidos
+    omitidos: Mapped[int] = mapped_column(Integer, default=0, nullable=False)    # ya eliminados, con mensajes, etc.
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # Auditoría
+    user_id: Mapped[Optional[str]] = mapped_column(GUID, nullable=True)
+    user_email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    ip: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow, onupdate=utcnow, nullable=False)
+    started_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime, nullable=True)
+    finished_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime, nullable=True)
 
 
 # Estados válidos de campañas y transiciones permitidas

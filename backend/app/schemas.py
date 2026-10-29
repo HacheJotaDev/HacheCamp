@@ -169,6 +169,7 @@ class ContactOut(ORMModel):
     source: Optional[str] = None
     created_at: datetime
     updated_at: datetime
+    deleted_at: Optional[datetime] = None  # V5: papelera de contactos
 
 
 class ContactDetailOut(ContactOut):
@@ -235,6 +236,8 @@ class ListOut(ORMModel):
     name: str
     description: Optional[str] = None
     created_at: datetime
+    deleted_at: Optional[datetime] = None  # V5: papelera de listas
+    contactos: Optional[int] = None        # V5: nº de contactos asociados
 
 
 class TagCreate(BaseModel):
@@ -494,6 +497,8 @@ class CampaignOut(ORMModel):
     completed_at: Optional[datetime] = None
     created_at: datetime
     updated_at: datetime
+    archived_at: Optional[datetime] = None  # V5: archivo
+    deleted_at: Optional[datetime] = None   # V5: papelera
 
 
 class CampaignDetailOut(CampaignOut):
@@ -557,6 +562,59 @@ class AuditOut(ORMModel):
 
 class SettingUpdate(BaseModel):
     value: Dict[str, Any]
+
+
+# --------------------------------------------------------------------------- #
+# V5: operaciones masivas de contactos (papelera, vaciado global, purga)
+# --------------------------------------------------------------------------- #
+
+
+class BulkDeleteFiltered(BaseModel):
+    """Eliminación lógica de contactos según los filtros del listado."""
+    q: Optional[str] = Field(default=None, max_length=200)
+    estado: Optional[str] = Field(default=None, max_length=20)
+    list_id: Optional[str] = None
+    tag_id: Optional[str] = None
+    confirmar: bool = False
+
+
+class VaciarTodoRequest(BaseModel):
+    """Vaciado global de contactos activos (admin, doble confirmación)."""
+    confirmar: bool = False
+    # Debe ser EXACTAMENTE "VACIAR CONTACTOS" (frase de confirmación escrita)
+    confirmar_texto: str = Field(default="", max_length=40)
+
+
+class PurgarRequest(BaseModel):
+    """Purga física irreversible de contactos YA eliminados lógicamente.
+
+    Autorización separada: exige frase exacta y omite contactos con mensajes
+    de campaña (sus estadísticas/eventos se preservan).
+    suprimir=True añade además los correos purgados a la lista de supresión
+    (evita reimportaciones accidentales; implica conservar el correo en la BD).
+    """
+    confirmar: bool = False
+    confirmar_texto: str = Field(default="", max_length=40)
+    antiguedad_minima_dias: int = Field(default=30, ge=0, le=3650)
+    suprimir: bool = False
+
+
+class BulkOperationOut(ORMModel):
+    id: str
+    tipo: str
+    status: str
+    total_objetivo: int
+    procesados: int
+    afectados: int
+    omitidos: int
+    progreso_pct: int = 0
+    cancel_requested: bool
+    last_error: Optional[str] = None
+    user_email: Optional[str] = None
+    criterios: Optional[Dict[str, Any]] = None
+    created_at: datetime
+    started_at: Optional[datetime] = None
+    finished_at: Optional[datetime] = None
 
 
 TokenResponse.model_rebuild()
