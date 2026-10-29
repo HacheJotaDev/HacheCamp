@@ -60,13 +60,13 @@ Revisa periódicamente:
 2. Campañas `fallida` — motivo en el historial de la campaña.
 3. Mensajes `incierto` — decidir según lo anterior.
 4. Espacio en disco de `backups/` y volúmenes (`df -h`).
-5. **Cola de eventos SQS**: `ApproximateNumberOfMessages` debe tender a 0; la DLQ `hj-campaigns-ses-events-dlq` debe estar vacía.
+5. **Cola de eventos SQS**: `ApproximateNumberOfMessages` debe tender a 0; la DLQ `hj-ses-eventos-dlq` debe estar vacía.
 
 ```bash
 # Profundidad de la cola de eventos y de la DLQ (aws CLI en el VPS o con el mismo usuario IAM)
 aws sqs get-queue-attributes --queue-url "$AWS_SQS_EVENTS_QUEUE_URL" \
   --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible --region us-east-2
-aws sqs get-queue-attributes --queue-url "$(aws sqs get-queue-url --queue-name hj-campaigns-ses-events-dlq --region us-east-2 --query QueueUrl --output text)" \
+aws sqs get-queue-attributes --queue-url "$(aws sqs get-queue-url --queue-name hj-ses-eventos-dlq --region us-east-2 --query QueueUrl --output text)" \
   --attribute-names ApproximateNumberOfMessages --region us-east-2
 ```
 

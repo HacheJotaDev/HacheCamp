@@ -121,12 +121,12 @@ class FakeSES:
 @pytest.fixture(autouse=True)
 def _clean_queue():
     """Vacía las colas de envíos, reintentos E importaciones tras cada prueba,
-    además de las cachés SES (cuota y configured)."""
+    además de las cachés SES (cuota, último dato válido y configured)."""
     yield
     from app.workers.redis_client import get_redis
     r = get_redis()
     r.delete("hj:q:outbound", "hj:q:retry", "hj:q:last_send_ns", "hj:q:import",
-             "hj:ses:quota", "hj:ses:configured")
+             "hj:ses:quota", "hj:ses:quota:last_good", "hj:ses:configured")
 
 
 @pytest.fixture
@@ -168,9 +168,9 @@ def fake_ses(monkeypatch):
     from app.services import ses as ses_service
     fake = FakeSES()
     monkeypatch.setattr(ses_service, "_client", lambda: fake)
-    # Invalida la caché de cuotas y la caché de proceso de credenciales
+    # Invalida la caché de cuotas (y el último dato válido) y la de credenciales
     from app.workers.redis_client import get_redis
-    get_redis().delete("hj:ses:quota")
+    get_redis().delete("hj:ses:quota", "hj:ses:quota:last_good")
     ses_service._CHAIN_CACHE["resultado"] = (False, 0.0)
     return fake
 

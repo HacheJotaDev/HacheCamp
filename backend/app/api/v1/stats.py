@@ -1,11 +1,13 @@
 """Estadísticas reales para el dashboard."""
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.core.db import get_db
 from app.core.deps import get_current_user
 from app.models import User
@@ -15,15 +17,36 @@ from app.services.stats import daily_series, dashboard_summary, deliverability_s
 router = APIRouter(prefix="/stats", tags=["Estadísticas"])
 
 
+def _cuota_para_panel() -> dict:
+    """Cuota SES lista para el panel: datos reales de AWS + objetivo propio.
+
+    Añade al payload de get_sending_quota:
+    - objetivo_por_segundo: velocidad objetivo GLOBAL configurada (12/s),
+      independiente del límite que SES autoriza a la cuenta.
+    - ultima_consulta_iso: fecha/hora legible de la última consulta correcta
+      a AWS (None si nunca se consultó con éxito).
+    Nunca inventa cifras: los fallos van marcados (disponible/desactualizado).
+    """
+    try:
+        quota = ses_service.get_sending_quota()
+    except Exception:
+        quota = {"error": "no_disponible", "region": settings.AWS_REGION,
+                 "disponible": False, "mensaje": "Cuota no consultable ahora mismo"}
+    quota["objetivo_por_segundo"] = settings.SEND_RATE_PER_SECOND
+    actualizado = quota.get("actualizado")
+    if actualizado:
+        quota["ultima_consulta_iso"] = datetime.fromtimestamp(int(actualizado)).astimezone().isoformat()
+    else:
+        quota["ultima_consulta_iso"] = None
+    return quota
+
+
 @router.get("/dashboard")
 def dashboard(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
     summary = dashboard_summary(db)
     metricas = metrics_summary(db)
-    # Cuota SES (cacheada; no bloquea el panel si falla)
-    try:
-        quota = ses_service.get_sending_quota()
-    except Exception:
-        quota = {"error": "no_disponible", "region": ses_service.settings.AWS_REGION}
+    # Cuota SES (cacheada en Redis 60 s; no bloquea el panel si falla)
+    quota = _cuota_para_panel()
     return {"resumen": summary, "metricas": metricas, "cuota_ses": quota,
             "nota_aperturas": ("Las aperturas son aproximadas: bloqueadores de imágenes, "
                                "proxies y mecanismos de privacidad pueden distorsionarlas.")}

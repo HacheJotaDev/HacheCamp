@@ -318,6 +318,9 @@ export interface DashboardData {
     rebotes: number;
     rebotes_temporales: number;
     quejas: number;
+    rechazados?: number;
+    retrasos?: number;
+    incierto?: number;
     success_rate: number | null;
     bounce_rate: number | null;
     open_rate: number | null;
@@ -330,6 +333,14 @@ export interface DashboardData {
     max_per_second?: number;
     region?: string;
     error?: string;
+    mensaje?: string;
+    disponible?: boolean;
+    desactualizado?: boolean;
+    edad_s?: number;
+    cacheado?: boolean;
+    actualizado?: number;
+    ultima_consulta_iso?: string | null;
+    objetivo_por_segundo?: number;
   };
   nota_aperturas: string;
 }

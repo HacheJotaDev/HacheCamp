@@ -73,7 +73,10 @@ export default function AjustesPage() {
       identidades: { identity: string; tipo: string; verificado: boolean }[];
       error_identidades: string | null;
       remitente_inicial: string;
+      configuration_set: string | null;
+      eventos_sqs: { habilitado: boolean; cola: string | null };
     }>("/api/v1/system/ses/status"),
+    refetchInterval: 60_000,
   });
 
   // Métricas reales de rendimiento (se actualizan solas cada 10 s)
@@ -214,6 +217,22 @@ export default function AjustesPage() {
                 <span className="text-muted-foreground">Región</span>
                 <Badge variant="outline">{ses?.region || "us-east-2"}</Badge>
               </div>
+              <div className="flex items-center justify-between border-b pb-2">
+                <span className="text-muted-foreground">Configuration set (eventos)</span>
+                {ses?.configuration_set ? (
+                  <Badge variant="outline" className="text-emerald-600 border-emerald-500/40">{ses.configuration_set}</Badge>
+                ) : (
+                  <Badge variant="outline" className="text-amber-600 border-amber-500/40">NO configurado: SES no emite eventos</Badge>
+                )}
+              </div>
+              <div className="flex items-center justify-between border-b pb-2">
+                <span className="text-muted-foreground">Cola de eventos SQS</span>
+                {ses?.eventos_sqs?.habilitado ? (
+                  <Badge variant="outline" className="text-emerald-600 border-emerald-500/40">{ses.eventos_sqs.cola}</Badge>
+                ) : (
+                  <Badge variant="outline" className="text-amber-600 border-amber-500/40">deshabilitada</Badge>
+                )}
+              </div>
               {ses?.cuota && !("error" in ses.cuota) ? (
                 <>
                   <div className="flex items-center justify-between border-b pb-2">
@@ -226,11 +245,21 @@ export default function AjustesPage() {
                     <span className="text-muted-foreground">Máximo por segundo</span>
                     <span className="font-medium tabular-nums">{String(ses.cuota.max_per_second)}</span>
                   </div>
+                  <div className="flex items-center justify-between border-b pb-2">
+                    <span className="text-muted-foreground">Última consulta AWS</span>
+                    <span className="font-medium tabular-nums text-xs">
+                      {ses.cuota.desactualizado ? (
+                        <Badge variant="outline" className="text-amber-600 border-amber-500/40">desactualizada</Badge>
+                      ) : ses.cuota.ultima_consulta_iso ? (
+                        fecha(String(ses.cuota.ultima_consulta_iso))
+                      ) : "nunca"}
+                    </span>
+                  </div>
                 </>
               ) : (
                 <p className="text-muted-foreground">
                   Cuota no disponible: el backend no puede consultar SES ahora mismo
-                  (¿credenciales IAM configuradas en el servidor?).
+                  ({ses?.cuota && "mensaje" in ses.cuota ? String(ses.cuota.mensaje) : "¿credenciales IAM configuradas en el servidor?"}).
                 </p>
               )}
               <div className="flex items-center justify-between border-b pb-2">
@@ -276,7 +305,9 @@ export default function AjustesPage() {
                 <Metrica etiqueta="Por segundo (60s)" valor={rend ? `${rend.por_segundo.toFixed(1)}` : "…"} />
                 <Metrica etiqueta="Por minuto (60m)" valor={rend ? rend.por_minuto.toLocaleString("es") : "…"} />
                 <Metrica etiqueta="Entregas (60m)" valor={rend ? rend.entregados_60m.toLocaleString("es") : "…"} />
-                <Metrica etiqueta="Enviados 24h (SES)" valor={rend ? Number(rend.cuota_24h?.sent_last_24h ?? 0).toLocaleString("es") : "…"} />
+                <Metrica etiqueta="Enviados 24h (SES)"
+                  valor={rend ? (rend.cuota_24h.disponible === false && !rend.cuota_24h.desactualizado
+                    ? "—" : Number(rend.cuota_24h.sent_last_24h ?? 0).toLocaleString("es")) : "…"} />
               </div>
               <div className="flex items-center justify-between border-b pb-2">
                 <span className="text-muted-foreground">Velocidad efectiva / configurada</span>
@@ -287,11 +318,18 @@ export default function AjustesPage() {
               <div className="flex items-center justify-between border-b pb-2">
                 <span className="text-muted-foreground">Cuota disponible 24 h</span>
                 <span className="font-medium tabular-nums">
-                  {rend?.cuota_24h && rend.cuota_24h.restante_24h != null
+                  {rend?.cuota_24h && rend.cuota_24h.restante_24h != null &&
+                    !(rend.cuota_24h.disponible === false && !rend.cuota_24h.desactualizado)
                     ? `${Number(rend.cuota_24h.restante_24h).toLocaleString("es")} (${rend.cuota_24h.usado_pct_24h ?? 0}% usado)`
-                    : "…"}
+                    : "—"}
                 </span>
               </div>
+              {rend?.cuota_24h?.desactualizado && (
+                <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-2.5 text-xs text-amber-700 dark:text-amber-400">
+                  <b>Cuota desactualizada</b> (último dato válido hace {rend.cuota_24h.edad_s ?? "?"} s):{" "}
+                  {rend.cuota_24h.mensaje || rend.cuota_24h.error || "AWS no responde"}
+                </div>
+              )}
               <div className="flex items-center justify-between border-b pb-2">
                 <span className="text-muted-foreground">Pendientes (cola / reintentos / BD)</span>
                 <span className="font-medium tabular-nums">
@@ -575,7 +613,11 @@ type SesRendimiento = {
   por_minuto: number;
   entregados_60m: number;
   velocidad: { configurada: number; limite_ses: number | null; efectiva: number | null };
-  cuota_24h: { max_24h?: number; sent_last_24h?: number; restante_24h?: number; usado_pct_24h?: number | null; error?: string };
+  cuota_24h: {
+    max_24h?: number; sent_last_24h?: number; restante_24h?: number; usado_pct_24h?: number | null;
+    error?: string; mensaje?: string; disponible?: boolean; desactualizado?: boolean;
+    edad_s?: number; ultima_consulta_iso?: string | null;
+  };
   pendientes: { cola_redis: number; reintentos_redis: number; base_datos: number };
   reintentos_y_errores: { reintentos_programados: number; errores_24h: number; incierto_total: number };
   campanas_activas: {

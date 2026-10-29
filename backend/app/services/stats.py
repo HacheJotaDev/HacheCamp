@@ -66,6 +66,19 @@ def metrics_summary(db: Session, campaign_id: Optional[str] = None) -> Dict[str,
     aperturas_unicas = _unicos_con_evento(db, "open", campaign_id)
     clics_unicos = _unicos_con_evento(db, "click", campaign_id)
 
+    # Señales de SES que son EVENTOS, no estados de mensaje:
+    # - delivery_delay: SES avisó de demora (buzón lento, greylisting). NO es
+    #   entrega ni error; el delivery definitivo llega después.
+    # - reject: SES rechazó el mensaje antes de aceptarlo (contenido, remitente).
+    def _eventos(tipo: str) -> int:
+        q = db.query(func.count(SesEvent.id)).filter(SesEvent.type == tipo)
+        if campaign_id:
+            q = q.filter(SesEvent.campaign_id == campaign_id)
+        return int(q.scalar() or 0)
+
+    retrasos = _eventos("delivery_delay")
+    rechazados = _eventos("reject")
+
     def _pct(numerador: int, denominador: int) -> Optional[float]:
         if denominador <= 0:
             return None  # no calculable: no se inventa un cero
@@ -80,6 +93,9 @@ def metrics_summary(db: Session, campaign_id: Optional[str] = None) -> Dict[str,
         "rebotes": rebotes_duros,
         "rebotes_temporales": rebotes_suaves,
         "quejas": quejas,
+        "rechazados": rechazados,
+        "retrasos": retrasos,
+        "incierto": inciertos,
         "success_rate": _pct(entregado, definitivos),
         "bounce_rate": _pct(rebotes_duros + rebotes_suaves, aceptados),
         "open_rate": _pct(aperturas_unicas, entregado),
@@ -91,6 +107,14 @@ def metrics_summary(db: Session, campaign_id: Optional[str] = None) -> Dict[str,
             "bounce_rate": "(rebotes permanentes + temporales) / aceptados por SES",
             "open_rate": "destinatarios únicos con apertura / entregas confirmadas",
             "click_rate": "destinatarios únicos con clic / entregas confirmadas",
+        },
+        "notas": {
+            "retrasos": ("Eventos DeliveryDelay de SES: el mensaje sigue en tránsito "
+                         "(no es entrega ni rebote); el resultado definitivo llega después."),
+            "rechazados": ("Mensajes que SES rechazó al procesarlos, antes de aceptarlos "
+                           "(cuenta como fallidos)."),
+            "incierto": ("Envíos sin confirmación de SES (timeout en la API): requieren "
+                         "reconciliación; no se cuentan ni como entrega ni como fallo."),
         },
     }
 
@@ -116,6 +140,7 @@ def deliverability_summary(db: Session) -> Dict[str, Any]:
         "rebote_permanente": m.get("rebote_permanente", 0),
         "rebote_temporal": m.get("rebote_temporal", 0),
         "rechazados": eventos.get("reject", 0),
+        "retrasos_entrega": eventos.get("delivery_delay", 0),
         "quejas_spam": eventos.get("complaint", 0),
         "ubicacion_desconocida": m.get("incierto", 0),
         "inbox_confirmado": None,
@@ -170,6 +195,9 @@ def dashboard_summary(db: Session) -> Dict[str, Any]:
         "rebotes": bounces,
         "rebotes_temporales": soft_bounces,
         "quejas": message_counts.get("queja", 0) or event_counts.get("complaint", 0),
+        "rechazados": event_counts.get("reject", 0),
+        "retrasos": event_counts.get("delivery_delay", 0),
+        "incierto": message_counts.get("incierto", 0),
         "bajas": event_counts.get("unsubscribe", 0),
         "aperturas": event_counts.get("open", 0),
         "clics": event_counts.get("click", 0),

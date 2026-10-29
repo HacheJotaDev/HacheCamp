@@ -21,6 +21,9 @@ interface Metricas {
   rebotes: number;
   rebotes_temporales: number;
   quejas: number;
+  rechazados?: number;
+  retrasos?: number;
+  incierto?: number;
   success_rate: number | null;
   bounce_rate: number | null;
   open_rate: number | null;
@@ -28,6 +31,7 @@ interface Metricas {
   aperturas_unicas: number;
   clics_unicos: number;
   denominadores: Record<string, string>;
+  notas?: Record<string, string>;
 }
 
 interface Punto {
@@ -111,12 +115,23 @@ export default function EstadisticasPage() {
               detalle={`${numero(metricas.clics_unicos)} destinatarios únicos`} icon={MousePointerClick} tono="text-teal-600" />
           </div>
 
-          <div className="grid gap-3 grid-cols-2 lg:grid-cols-5">
-            <TarjetaMini titulo="Aceptados por SES" valor={metricas.aceptados_ses} />
-            <TarjetaMini titulo="Entregados" valor={metricas.entregados} />
-            <TarjetaMini titulo="Pendientes" valor={metricas.pendientes} />
-            <TarjetaMini titulo="Fallidos" valor={metricas.fallidos} />
-            <TarjetaMini titulo="Quejas" valor={metricas.quejas} />
+          <div className="grid gap-3 grid-cols-2 lg:grid-cols-4">
+            <TarjetaMini titulo="Aceptados por SES" valor={metricas.aceptados_ses}
+              detalle="La API aceptó los mensajes" />
+            <TarjetaMini titulo="Entregados" valor={metricas.entregados}
+              detalle="Confirmados por el servidor receptor" />
+            <TarjetaMini titulo="Pendientes" valor={metricas.pendientes}
+              detalle="En cola o en proceso" />
+            <TarjetaMini titulo="Fallidos" valor={metricas.fallidos}
+              detalle="Incluye rechazos por SES" />
+            <TarjetaMini titulo="Rechazados" valor={metricas.rechazados ?? 0}
+              detalle="SES los rechazó antes de aceptarlos" />
+            <TarjetaMini titulo="Retrasos" valor={metricas.retrasos ?? 0}
+              detalle="En tránsito: SES avisó de demora" />
+            <TarjetaMini titulo="Inciertos" valor={metricas.incierto ?? 0}
+              detalle="Sin confirmación; requieren reconciliación" />
+            <TarjetaMini titulo="Quejas" valor={metricas.quejas}
+              detalle="Marcados como spam por el destinatario" />
           </div>
         </>
       )}
@@ -167,6 +182,9 @@ export default function EstadisticasPage() {
           {metricas?.denominadores && Object.entries(metricas.denominadores).map(([k, v]) => (
             <p key={k}><b className="text-foreground">{etiquetaTasa(k)}:</b> {v}.</p>
           ))}
+          {metricas?.notas && Object.entries(metricas.notas).map(([k, v]) => (
+            <p key={k}><b className="text-foreground">{etiquetaContador(k)}:</b> {v}</p>
+          ))}
           <p className="text-xs pt-1 border-t">
             Las aperturas son aproximadas (bloqueadores de imágenes, proxies de privacidad). Un mismo
             destinatario con varias aperturas cuenta como una sola persona. Distinguir «aceptado por SES»
@@ -193,6 +211,15 @@ function etiquetaTasa(k: string): string {
   return mapa[k] ?? k;
 }
 
+function etiquetaContador(k: string): string {
+  const mapa: Record<string, string> = {
+    retrasos: "Retrasos",
+    rechazados: "Rechazados",
+    incierto: "Inciertos",
+  };
+  return mapa[k] ?? k;
+}
+
 function Tarjeta({ titulo, valor, detalle, icon: Icon, tono }: {
   titulo: string; valor: string; detalle: string;
   icon: React.ComponentType<{ className?: string }>; tono: string;
@@ -215,12 +242,13 @@ function Tarjeta({ titulo, valor, detalle, icon: Icon, tono }: {
   );
 }
 
-function TarjetaMini({ titulo, valor }: { titulo: string; valor: number }) {
+function TarjetaMini({ titulo, valor, detalle }: { titulo: string; valor: number; detalle?: string }) {
   return (
     <Card>
       <CardContent className="p-3 text-center">
         <p className="text-lg font-bold tabular-nums">{numero(valor)}</p>
         <p className="text-[11px] text-muted-foreground">{titulo}</p>
+        {detalle && <p className="text-[10px] text-muted-foreground/70 mt-0.5 line-clamp-2">{detalle}</p>}
       </CardContent>
     </Card>
   );

@@ -89,6 +89,8 @@ export default function PanelPage() {
   const m = data?.metricas;
   const cuota = data?.cuota_ses;
   const cuotaPct = cuota?.max_24h ? Math.min(100, ((cuota.sent_last_24h || 0) / cuota.max_24h) * 100) : 0;
+  const cuotaRestante = cuota?.max_24h != null ? Math.max(0, (cuota.max_24h || 0) - (cuota.sent_last_24h || 0)) : null;
+  const sinDatosCuota = !!cuota?.error && !cuota?.desactualizado;
   const contactosTotal = (r as unknown as { contactos?: { total?: number } } | undefined)?.contactos?.total ?? 0;
   const vacio = r && r.campanas_total === 0 && contactosTotal === 0;
 
@@ -198,12 +200,23 @@ export default function PanelPage() {
                 <CardTitle className="flex items-center gap-2">
                   <Gauge className="h-4 w-4 text-emerald-600" /> Cuota de Amazon SES
                 </CardTitle>
-                <CardDescription>Región {cuota?.region || "us-east-2"}</CardDescription>
+                <CardDescription>
+                  Región {cuota?.region || "us-east-2"}
+                  {cuota?.ultima_consulta_iso ? ` · consultada ${fecha(cuota.ultima_consulta_iso)}` : " · sin consulta aún"}
+                  {cuota?.cacheado && !cuota?.desactualizado ? " · caché (< 60 s)" : ""}
+                </CardDescription>
               </CardHeader>
               <CardContent className="space-y-4">
-                {cuota?.error ? (
+                {cuota?.desactualizado && (
+                  <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-2.5 text-xs text-amber-700 dark:text-amber-400">
+                    <b>Datos desactualizados</b> (último dato válido hace {cuota.edad_s ?? "?"} s):{" "}
+                    {cuota.mensaje || cuota.error || "AWS no responde"}
+                  </div>
+                )}
+                {sinDatosCuota ? (
                   <p className="text-sm text-muted-foreground">
-                    Cuota no disponible ahora ({cuota.error}). El envío no se ve afectado.
+                    Cuota no disponible ahora. {cuota?.mensaje || cuota?.error || ""}
+                    {" "}El envío no se ve afectado; reintenta en unos minutos.
                   </p>
                 ) : (
                   <>
@@ -217,8 +230,20 @@ export default function PanelPage() {
                       <Progress value={cuotaPct} className="h-2" />
                     </div>
                     <div className="flex justify-between text-sm">
-                      <span className="text-muted-foreground">Máximo por segundo</span>
+                      <span className="text-muted-foreground">Cuota disponible (24 h)</span>
+                      <span className="font-medium tabular-nums">
+                        {cuotaRestante != null ? numero(cuotaRestante) : "—"}
+                      </span>
+                    </div>
+                    <div className="flex justify-between text-sm">
+                      <span className="text-muted-foreground">Máximo por segundo (SES)</span>
                       <span className="font-medium tabular-nums">{cuota?.max_per_second ?? "—"}</span>
+                    </div>
+                    <div className="flex justify-between text-sm">
+                      <span className="text-muted-foreground">Objetivo global configurado</span>
+                      <span className="font-medium tabular-nums">
+                        {cuota?.objetivo_por_segundo != null ? `${cuota.objetivo_por_segundo}/s` : "—"}
+                      </span>
                     </div>
                   </>
                 )}

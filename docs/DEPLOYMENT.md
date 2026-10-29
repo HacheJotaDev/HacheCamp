@@ -124,7 +124,7 @@ docker compose exec -T api python scripts/setup_ses_events.py --aplicar   # ejec
 Al terminar, el script imprime la URL de la cola. Añádela al `.env`:
 
 ```bash
-AWS_SQS_EVENTS_QUEUE_URL=https://sqs.us-east-2.amazonaws.com/TU_CUENTA/hj-campaigns-ses-events
+AWS_SQS_EVENTS_QUEUE_URL=https://sqs.us-east-2.amazonaws.com/TU_CUENTA/hj-ses-eventos
 docker compose up -d events-worker    # arranca el consumidor dedicado de eventos
 ```
 
@@ -133,7 +133,7 @@ Detalles de seguridad:
 - La cola solo acepta mensajes del tópico SNS creado (política con `aws:SourceArn`).
 - El tópico solo acepta publicaciones de SES de tu cuenta (`AWS:SourceAccount`).
 - El sobre SNS llega con firma **SignatureVersion 1** que el worker verifica criptográficamente antes de procesar (configurable con `SQS_VERIFY_SNS_SIGNATURE`).
-- Idempotencia por `MessageId` de SNS y por uid de evento; mensaje venenoso → DLQ (`hj-campaigns-ses-events-dlq`) y descarte controlado tras `SQS_MAX_RECEIVE_COUNT` lecturas.
+- Idempotencia por `MessageId` de SNS y por uid de evento; mensaje venenoso → DLQ (`hj-ses-eventos-dlq`) y descarte controlado tras `SQS_MAX_RECEIVE_COUNT` lecturas.
 - Permisos IAM del usuario `ses-vps-leisureparts`: además de SES, necesita SQS/SNS (el script imprime la política exacta si le falta algo). Tras la primera configuración puedes revocar los permisos de creación y dejar solo `sqs:ReceiveMessage`, `sqs:DeleteMessage*`, `sqs:GetQueue*`.
 
 ### Alternativa: webhook HTTP (solo con HTTPS)

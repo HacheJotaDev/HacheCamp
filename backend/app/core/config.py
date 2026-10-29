@@ -89,7 +89,9 @@ class Settings(BaseSettings):
     SNS_TOPIC_ARNS: str = ""  # Lista blanca opcional de tópicos (separada por comas)
 
     # --- Envío ---------------------------------------------------------------
-    SEND_RATE_PER_SECOND: float = 5.0        # Límite configurable de la cola (GLOBAL)
+    # Objetivo global de 12 destinatarios/s compartido por todos los workers
+    # vía Redis (la efectiva es min(este valor, MaxSendRate real de SES)).
+    SEND_RATE_PER_SECOND: float = 12.0
     SEND_BATCH_SIZE: int = 100
     RETRY_BACKOFF_SECONDS: int = 60          # Base exponencial (60, 120, 240...)
     RETRY_MAX_ATTEMPTS: int = 4

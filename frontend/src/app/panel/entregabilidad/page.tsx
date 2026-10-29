@@ -3,7 +3,7 @@
 import { useQuery } from "@tanstack/react-query";
 import {
   Inbox, HelpCircle, CheckCircle2, AlertTriangle, ServerOff, ShieldAlert,
-  CircleHelp, Info, Ban,
+  CircleHelp, Info, Ban, Clock,
 } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -17,6 +17,7 @@ interface DeliverabilityData {
   rebote_permanente: number;
   rebote_temporal: number;
   rechazados: number;
+  retrasos_entrega?: number;
   quejas_spam: number;
   ubicacion_desconocida: number;
   inbox_confirmado: number | null;
@@ -63,6 +64,9 @@ export default function EntregabilidadPage() {
             <Tarjeta titulo="Rechazado" icon={ServerOff}
               valor={data.rechazados} tono="text-red-600"
               detalle="SES rechazó el mensaje al procesarlo" />
+            <Tarjeta titulo="Retrasos de entrega" icon={Clock}
+              valor={data.retrasos_entrega ?? 0} tono="text-sky-600"
+              detalle="En tránsito (DeliveryDelay): no es entrega ni rebote" />
             <Tarjeta titulo="Ubicación desconocida" icon={CircleHelp}
               valor={data.ubicacion_desconocida} tono="text-violet-600"
               detalle="Resultado no confirmado tras el envío (requiere reconciliación)" />

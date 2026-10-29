@@ -5,6 +5,52 @@ Formato basado en [Keep a Changelog](https://keepachangelog.com/es-ES/1.1.0/) y 
 
 ## [Sin publicar]
 
+### Verificación funcional del panel (estadísticas reales y cuota SES)
+
+- **Retrasos de entrega visibles** (`services/stats.py`, `api/v1/stats.py`, frontend):
+  los eventos `delivery_delay` de SES se registraban pero no se mostraban en
+  ninguna parte. Ahora «Retrasos» aparece en Estadísticas y Entregabilidad
+  (en tránsito: no es entrega ni rebote; el resultado definitivo llega después).
+- **Rechazados e inciertos explícitos** (`services/stats.py`):
+  `metrics_summary` expone `rechazados` (eventos reject), `retrasos` e
+  `incierto` con notas explicativas; `dashboard_summary` añade los tres
+  contadores; `deliverability_summary` añade `retrasos_entrega`.
+- **Cuota SES real con actualización de ~60 s** (`services/ses.py`,
+  `workers/scheduler.py`): TTL de caché de 600 s → 60 s y el scheduler
+  refresca cada 60 s (`CUOTA_REFRESH_SEGUNDOS`), sincronizado. Máximo
+  1 GetAccount/minuto hacia AWS; el panel nunca muestra cifras congeladas
+  como si fueran actuales.
+- **Honestidad ante fallos de AWS** (`services/ses.py`, frontend): si AWS no
+  responde o faltan permisos IAM, `get_sending_quota()` devuelve el ÚLTIMO
+  dato válido conocido marcado `desactualizado: true` con su edad en segundos
+  (o `disponible: false` si nunca hubo dato), con el error CLASIFICADO en
+  español (permisos IAM vs. red/disponibilidad; `error` lleva el código AWS
+  real, p. ej. `AccessDenied`). Nada de ceros disfrazados de cifras.
+- **Panel principal** (`frontend/src/app/panel/page.tsx`): la tarjeta de cuota
+  muestra consumo 24 h, cuota disponible calculada, máximo por segundo de SES,
+  objetivo global configurado (12/s), fecha/hora de la última consulta y
+  aviso ámbar de datos desactualizados con su motivo.
+- **Ajustes → Amazon SES** (`frontend/src/app/panel/ajustes/page.tsx`):
+  nuevas filas de configuration set aplicado (hj-campanas) y cola de eventos
+  SQS; «Última consulta AWS» con estado; sección de rendimiento honesta ante
+  datos desactualizados (— en vez de ceros engañosos).
+- **Puerta de cuota 24 h resiliente** (`services/ses.py`): si la caché
+  principal caducó durante una avería de AWS, `cuota_24h_restante()` usa el
+  último dato válido (hasta 24 h) en vez de quedarse ciega.
+- **`healthz` preciso** (`api/v1/system.py`): `ses` reporta `ok` /
+  `desactualizado` / `sin_verificar` (antes solo ok/sin_verificar).
+- **Nombres canónicos del pipeline de eventos** (`scripts/setup_ses_events.py`,
+  `.env.example`, docs): cola `hj-ses-eventos` (+DLQ `-dlq`), destino de
+  eventos `hj-eventos`, conjunto de configuración `hj-campanas` — coherentes
+  con docs/Eventos_SES_SQS.md (configuración real del VPS). `.env.example`
+  documenta `SES_CONFIGURATION_SET=hj-campanas` y `SEND_RATE_PER_SECOND=12`
+  (objetivo global compartido por los 14 workers, sujeto a la cuota de AWS).
+- **14 pruebas nuevas** (`tests/test_verificacion_final.py`): retrasos/
+  rechazados/incierto en métricas, TTL 60 s, last-good desactualizado,
+  clasificación IAM, puerta de cuota con last-good, objetivo+última consulta
+  en el dashboard, configuration set aplicado a cada envío, nombres canónicos
+  y refresco de cuota a 60 s.
+
 ### Integración de hotfixes de producción (V4 + parche local VPS)
 
 - **Conteo eficiente de destinatarios** (`api/v1/campaigns.py`, `services/campaigns.py`):

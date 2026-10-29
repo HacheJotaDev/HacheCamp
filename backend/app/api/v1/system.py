@@ -37,12 +37,18 @@ def healthz(db: Session = Depends(get_db)):
     except Exception:
         checks["db"] = "error"
     checks["redis"] = "ok" if redis_ok() else "error"
-    ses_ok = True
+    ses_estado = "sin_verificar"
     try:
-        ses_service.get_sending_quota()
+        cuota = ses_service.get_sending_quota()
+        if cuota.get("desactualizado"):
+            # AWS no responde pero mostramos el último dato válido conocido:
+            # el contenedor no está caído, SES está inaccesible.
+            ses_estado = "desactualizado"
+        else:
+            ses_estado = "ok"
     except Exception:
-        ses_ok = False
-    checks["ses"] = "ok" if ses_ok else "sin_verificar"
+        ses_estado = "sin_verificar"
+    checks["ses"] = ses_estado
     overall = "degradado" if "error" in checks.values() else "ok"
     return {"estado": overall, "comprobaciones": checks, "version": "1.0.0"}
 
@@ -141,11 +147,17 @@ def ses_rendimiento(db: Session = Depends(get_db)):
     try:
         cuota = ses_service.get_sending_quota()
     except Exception as exc:
-        cuota = {"error": type(exc).__name__}
+        cuota = {"error": type(exc).__name__, "disponible": False}
     max_24h = float(cuota.get("max_24h") or 0)
     enviados_24h = float(cuota.get("sent_last_24h") or 0)
     cuota = {**cuota, "restante_24h": max(0, max_24h - enviados_24h),
              "usado_pct_24h": round(enviados_24h / max_24h * 100, 1) if max_24h else None}
+    # Fecha/hora legible de la última consulta correcta a AWS (None si nunca)
+    from datetime import datetime as _dt
+    if cuota.get("actualizado"):
+        cuota["ultima_consulta_iso"] = _dt.fromtimestamp(int(cuota["actualizado"])).astimezone().isoformat()
+    else:
+        cuota["ultima_consulta_iso"] = None
 
     pendientes_db = (
         db.query(func.count(CampaignMessage.id))

@@ -28,10 +28,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from app.core.config import settings  # noqa: E402
 
 CUENTA_REGION = settings.AWS_REGION
-NOMBRE_COLA = "hj-campaigns-ses-events"
-NOMBRE_DLQ = "hj-campaigns-ses-events-dlq"
-NOMBRE_TOPICO = "hj-campaigns-ses-events"
-NOMBRE_DESTINO = "hj-campaigns-eventos"
+# Nombres canónicos de los recursos AWS (coherentes con docs/Eventos_SES_SQS.md
+# §2, que documenta la configuración REAL del VPS). Si tu cuenta ya tuviera
+# recursos con otros nombres (p. ej. creados con la versión antigua de este
+# script), ajusta las variables o el .env: la ingesta depende de
+# AWS_SQS_EVENTS_QUEUE_URL, no de estos constantes.
+NOMBRE_COLA = "hj-ses-eventos"
+NOMBRE_DLQ = "hj-ses-eventos-dlq"
+NOMBRE_TOPICO = "hj-ses-eventos"
+NOMBRE_DESTINO = "hj-eventos"                     # destino de eventos dentro del conjunto
+NOMBRE_CONFIG_SET_DEFECTO = "hj-campanas"         # igual que SES_CONFIGURATION_SET en producción
 RETENCION_SEG = "1209600"  # 14 días
 EVENTOS_BASE = ["SEND", "DELIVERY", "BOUNCE", "COMPLAINT", "REJECT", "RENDERING_FAILURE"]
 EVENTOS_EXTRA = ["OPEN", "CLICK"]
@@ -79,7 +85,7 @@ def _plan(ses, sns, sqs, cuenta: str, incluir_aperturas: bool) -> dict:
     if arn_cola and not any(s.get("Endpoint") == arn_cola for s in suscripciones):
         plan["acciones"].append(f"suscribir la cola al tópico (raw=false, con firma SNS)")
 
-    cs = settings.SES_CONFIGURATION_SET or "hj-campaigns"
+    cs = settings.SES_CONFIGURATION_SET or NOMBRE_CONFIG_SET_DEFECTO
     try:
         ses.get_configuration_set(ConfigurationSetName=cs)
         existe = True
@@ -179,7 +185,7 @@ def _aplicar(ses, sns, sqs, cuenta: str, incluir_aperturas: bool) -> int:
     print("  ✓ Política de la cola actualizada (solo SNS del tópico)")
 
     # 6) Conjunto de configuración SES y destino de eventos
-    cs = settings.SES_CONFIGURATION_SET or "hj-campaigns"
+    cs = settings.SES_CONFIGURATION_SET or NOMBRE_CONFIG_SET_DEFECTO
     try:
         ses.get_configuration_set(ConfigurationSetName=cs)
         print(f"  • Conjunto de configuración SES ya existía: {cs}")

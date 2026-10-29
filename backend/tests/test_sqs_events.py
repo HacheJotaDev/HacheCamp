@@ -23,7 +23,7 @@ from tests.conftest import SessionLocal
 # usar el mismo nombre garantiza compartir la clave RSA y evitar módulos duplicados.
 from test_webhooks_tracking import _make_sns_notification, _mk_message_with_ses_id, _get_rsa_key
 
-QUEUE_URL = "https://sqs.us-east-2.amazonaws.com/123456789012/hj-campaigns-ses-events"
+QUEUE_URL = "https://sqs.us-east-2.amazonaws.com/123456789012/hj-ses-eventos"
 
 
 class FakeSqs:

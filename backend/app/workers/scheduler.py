@@ -24,6 +24,11 @@ logger = get_logger("hj.scheduler")
 
 _running = True
 
+# Refresco de la caché de cuota SES: sincronizado con QUOTA_CACHE_TTL (60 s).
+# El panel pide la cuota cada ~60 s; el scheduler garantiza que la caché esté
+# caliente para que la puerta de cuota 24 h del worker no quede ciega.
+CUOTA_REFRESH_SEGUNDOS = 60
+
 
 def stop() -> None:
     """Apagado limpio (SIGTERM de docker stop)."""
@@ -100,7 +105,7 @@ def run_forever(interval_seconds: int = 20) -> None:
                         logger.warning("Recuperación: huérfanos reencolados",
                                        extra={"cantidad": huerfanos})
 
-                if now - last_quota > 600:  # cada 10 minutos
+                if now - last_quota > CUOTA_REFRESH_SEGUNDOS:
                     refresh_quota_cache()
                     last_quota = now
 

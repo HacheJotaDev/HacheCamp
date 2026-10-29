@@ -22,7 +22,16 @@ from app.workers.redis_client import get_redis
 logger = get_logger("hj.ses")
 
 QUOTA_CACHE_KEY = "hj:ses:quota"
-QUOTA_CACHE_TTL = 600  # 10 minutos
+# TTL de 60 s: el panel refresca la cuota cada ~60 s y el scheduler rellena
+# la caché cada 60 s, así que el dato mostrado nunca tiene más de un minuto
+# y AWS recibe como máximo 1 GetAccount/minuto (evita consultas innecesarias
+# sin servir cifras congeladas como si fueran actuales).
+QUOTA_CACHE_TTL = 60
+# Último dato válido conocido ("last known good"): si AWS deja de responder
+# o fallan los permisos IAM, el panel muestra ESTE dato marcado explícitamente
+# como desactualizado (con su edad), nunca ceros disfrazados de cifras reales.
+QUOTA_LAST_GOOD_KEY = "hj:ses:quota:last_good"
+QUOTA_LAST_GOOD_TTL = 86400  # 24 h: pasado ese tiempo, "no disponible" a secas
 # Caché de proceso para la comprobación de credenciales (evita repetir la
 # lectura de la cadena de Boto3 —y el sondeo de IMDS cuando no hay archivo—
 # en cada mensaje con 14 workers).
@@ -110,14 +119,51 @@ def ses_configured() -> bool:
 # --------------------------------------------------------------------------- #
 
 
+def _aws_error_code(exc: Exception) -> str:
+    """Código de error AWS (p. ej. AccessDenied) o nombre de la excepción."""
+    if hasattr(exc, "response") and isinstance(getattr(exc, "response", None), dict):
+        codigo = str(exc.response.get("Error", {}).get("Code", ""))
+        if codigo:
+            return codigo
+    return type(exc).__name__
+
+
+def _clasificar_error_aws(exc: Exception) -> str:
+    """Mensaje claro para el panel según el tipo de fallo de AWS.
+
+    Distingue permisos IAM (AccessDenied, credenciales inválidas/caducadas)
+    de problemas de red/disponibilidad: el usuario necesita saber si debe
+    revisar la política IAM o esperar a que AWS vuelva.
+    """
+    texto = _aws_error_code(exc).lower()
+    if any(s in texto for s in ("accessdenied", "unauthorized", "forbidden",
+                                 "invalidclienttokenid", "expiredtoken",
+                                 "invalidsignature", "signaturedoesnotmatch")):
+        return ("Faltan permisos IAM o las credenciales no son válidas para "
+                "ses:GetAccount: revise docs/SES_PERMISOS.md")
+    if any(s in texto for s in ("connect", "timeout", "endpointconnectionerror",
+                                 "connectionerror", "connectionclosederror",
+                                 "readtimeout", "proxyerror", "unavailable",
+                                 "internalerror", "slowdown")):
+        return "AWS no responde (error de red o disponibilidad)"
+    return f"Error consultando AWS: {_aws_error_code(exc)}"
+
+
 def get_sending_quota(force_refresh: bool = False) -> Dict[str, Any]:
-    """Cuotas reales de SES con caché en Redis.
+    """Cuotas reales de SES con caché en Redis (TTL 60 s).
 
     Usa `GetAccount` (operación real de la API SESv2). El sdk no ofrece
     `GetAccountSendingCapabilities` en sesv2: llamarlo rompía la consulta
     en producción. `GetAccount` devuelve las cuotas anidadas:
       SendQuota: {Max24HourSend, SentLast24Hours, MaxSendRate}
     y `SendingEnabled` al nivel raíz.
+
+    Comportamiento ante fallo de AWS (nunca cifras inventadas):
+    - Si existe un último dato válido conocido (últimas 24 h) se devuelve
+      ESE dato con `desactualizado: true` y su edad en segundos.
+    - Si no hay ninguno, se devuelve `disponible: false` con el error
+      clasificado (permisos IAM vs. red) y ceros EXPLÍCITOS como ausencia
+      de dato (el frontend los muestra como «no disponible»).
     """
     r = get_redis()
     if not force_refresh:
@@ -125,6 +171,7 @@ def get_sending_quota(force_refresh: bool = False) -> Dict[str, Any]:
         if cached:
             data = json.loads(cached)
             data["cacheado"] = True
+            data["disponible"] = True
             return data
     try:
         client = _client()
@@ -137,18 +184,45 @@ def get_sending_quota(force_refresh: bool = False) -> Dict[str, Any]:
             "reputacion": bool(cuenta.get("SendingEnabled", False)),
             "region": settings.AWS_REGION,
             "cacheado": False,
+            "disponible": True,
+            "desactualizado": False,
             "actualizado": int(time.time()),
         }
         r.set(QUOTA_CACHE_KEY, json.dumps(quota), ex=QUOTA_CACHE_TTL)
+        # Copia "último dato válido" para poder mostrar algo honesto si AWS
+        # deja de responder (marcado como desactualizado, nunca como real).
+        try:
+            r.set(QUOTA_LAST_GOOD_KEY, json.dumps(quota), ex=QUOTA_LAST_GOOD_TTL)
+        except Exception:
+            pass
         return quota
     except SESNotConfigured:
         raise
     except Exception as exc:
-        logger.warning("No se pudo consultar la cuota de SES: %s", type(exc).__name__)
+        logger.warning("No se pudo consultar la cuota de SES: %s", _aws_error_code(exc))
+        mensaje = _clasificar_error_aws(exc)
+        ahora = int(time.time())
+        try:
+            ultimo = r.get(QUOTA_LAST_GOOD_KEY)
+        except Exception:
+            ultimo = None
+        if ultimo:
+            data = json.loads(ultimo)
+            edad = max(0, ahora - int(data.get("actualizado") or ahora))
+            return {
+                **data,
+                "cacheado": True,
+                "disponible": False,
+                "desactualizado": True,
+                "edad_s": edad,
+                "error": _aws_error_code(exc),
+                "mensaje": f"{mensaje} (datos de hace {edad} s)",
+            }
         return {
             "max_24h": 0, "sent_last_24h": 0, "max_per_second": 0,
             "region": settings.AWS_REGION, "cacheado": False,
-            "error": type(exc).__name__,
+            "disponible": False, "desactualizado": False,
+            "error": _aws_error_code(exc), "mensaje": mensaje,
         }
 
 
@@ -167,13 +241,18 @@ def effective_rate_per_second() -> float:
 def cuota_24h_restante() -> Optional[float]:
     """Cuota diaria (24 h) restante según la CACHÉ de Redis; nunca consulta AWS.
 
-    La caché la rellena get_sending_quota (TTL 10 min) y el scheduler la
-    refresca cada 10 minutos, así que la puerta de cuota no añade ninguna
-    llamada por mensaje. Devuelve None si no hay datos en caché (la puerta
-    no bloquea; no confundimos falta de datos con cuota agotada).
+    La caché la rellena get_sending_quota (TTL 60 s) y el scheduler la
+    refresca cada 60 segundos, así que la puerta de cuota no añade ninguna
+    llamada por mensaje. Si la caché caducó (p. ej. AWS caído más de 1 min),
+    usa el último dato válido conocido (hasta 24 h de antigüedad): la puerta
+    sigue operativa durante averías de AWS en vez de quedarse ciega.
+    Devuelve None si no hay NINGÚN dato (la puerta no bloquea; no confundimos
+    falta de datos con cuota agotada).
     """
     try:
         cached = get_redis().get(QUOTA_CACHE_KEY)
+        if not cached:
+            cached = get_redis().get(QUOTA_LAST_GOOD_KEY)
     except Exception:
         return None
     if not cached:
