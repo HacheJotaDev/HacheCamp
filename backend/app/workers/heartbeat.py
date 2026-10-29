@@ -72,7 +72,7 @@ def is_fresh(name: str, max_age_seconds: int) -> Tuple[bool, float]:
     """
     try:
         raw = get_redis().get(_key(name))
-    except Exception as exc:
+    except Exception:
         return False, -1.0
     if not raw:
         return False, -1.0

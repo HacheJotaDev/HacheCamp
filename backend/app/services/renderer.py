@@ -14,10 +14,9 @@ import re
 from typing import Any, Dict, List, Optional
 
 import html2text
-from jinja2 import Environment, StrictUndefined, Undefined
+from jinja2 import Undefined
 from jinja2.sandbox import SandboxedEnvironment
 
-from app.core.config import settings
 from app.services.sanitizer import inline_email_css, sanitize_email_html, validate_url
 
 # --------------------------------------------------------------------------- #

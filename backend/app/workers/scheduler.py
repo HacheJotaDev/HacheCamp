@@ -5,15 +5,11 @@ Ejecución: python -m app.workers.scheduler
 from __future__ import annotations
 
 import time
-from datetime import timezone as tz_module
-from typing import Optional
 
-from sqlalchemy import func
 
-from app.core.config import settings
 from app.core.db import SessionLocal, utcnow
 from app.core.logging_conf import get_logger, setup_logging
-from app.models import Campaign, CampaignMessage
+from app.models import Campaign
 from app.services import campaigns as campaign_service
 from app.services import queue as send_queue
 from app.services import ses as ses_service

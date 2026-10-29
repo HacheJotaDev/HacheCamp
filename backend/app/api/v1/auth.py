@@ -25,7 +25,6 @@ from app.models import User
 from app.schemas import (
     LoginRequest,
     MFAEnableRequest,
-    MFARecoveryRequest,
     MFATokenResponse,
     MFASetupResponse,
     MFAVerifyRequest,

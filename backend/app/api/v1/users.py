@@ -1,18 +1,17 @@
 """Gestión de usuarios (solo administradores) y auditoría."""
 from __future__ import annotations
 
-import secrets
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.core import security
 from app.core.audit import audit
 from app.core.db import get_db
-from app.core.deps import get_current_user, require_admin
-from app.models import AuditLog, User
+from app.core.deps import require_admin
+from app.models import User
 from app.schemas import AdminPasswordReset, UserCreate, UserOut, UserUpdate
 
 router = APIRouter(prefix="/users", tags=["Usuarios"])

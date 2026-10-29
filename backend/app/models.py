@@ -20,8 +20,6 @@ from sqlalchemy import (
     JSON,
     Boolean,
     Column,
-    DateTime,
-    Float,
     ForeignKey,
     Index,
     Integer,

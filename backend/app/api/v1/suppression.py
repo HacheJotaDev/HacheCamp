@@ -1,7 +1,7 @@
 """Lista de supresión global: nunca se envía a estas direcciones."""
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import func
@@ -9,7 +9,6 @@ from sqlalchemy.orm import Session
 
 from app.core import security
 from app.core.audit import audit
-from app.core.db import get_db
 from app.core.deps import get_current_user
 from app.models import Contact, Suppression, User
 from app.schemas import SuppressionCreate, SuppressionOut

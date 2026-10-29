@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import csv
 import io
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 from app.core.config import settings
 from app.services.contacts import is_valid_email, normalize_email

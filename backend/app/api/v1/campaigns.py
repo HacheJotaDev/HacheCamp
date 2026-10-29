@@ -3,7 +3,7 @@ cancelación, progreso en tiempo real e historial."""
 from __future__ import annotations
 
 import zoneinfo
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -14,7 +14,7 @@ from app.core import security
 from app.core.audit import audit
 from app.core.db import get_db, utcnow
 from app.core.deps import get_current_user, require_admin
-from app.models import Campaign, CampaignMessage, SesEvent, Template, User
+from app.models import Campaign, CampaignMessage, SesEvent, User
 from app.services import contacts as contact_service
 from app.schemas import (
     CampaignAction,
@@ -34,7 +34,6 @@ from app.services import ses as ses_service
 from app.services.renderer import (
     html_to_plain_text,
     render_campaign_email,
-    render_template_string,
     validate_template_source,
 )
 from app.services.sanitizer import SanitizationError, sanitize_editor_blocks, sanitize_email_html

@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.db import utcnow
 from app.core.logging_conf import get_logger
-from app.models import Campaign, CampaignMessage, Contact, SesEvent
+from app.models import CampaignMessage, Contact, SesEvent
 from app.services import contacts as contact_service
 from app.services import queue as send_queue
 
@@ -121,7 +121,7 @@ def verify_sns_signature(sns: Dict[str, Any]) -> None:
     if not signature:
         raise SNSSecurityError("Falta la firma")
 
-    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives import hashes
     from cryptography.hazmat.primitives.asymmetric import padding
 
     try:

@@ -7,7 +7,6 @@ from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
 from app.core import security
-from app.core.config import settings
 from app.core.db import get_db
 from app.models import User
 

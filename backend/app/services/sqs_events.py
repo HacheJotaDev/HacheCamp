@@ -104,7 +104,6 @@ def procesar_mensaje(db, sqs_message: Dict[str, Any]) -> Dict[str, Any]:
     Devuelve un resumen {accion: ...} para logs/métricas.
     """
     sqs_id = sqs_message.get("messageId", "")
-    receive_count = int(sqs_message.get("receive_count", 0))
     raw_body = sqs_message.get("body") or ""
 
     try:
