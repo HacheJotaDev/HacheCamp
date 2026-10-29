@@ -168,9 +168,10 @@ def fake_ses(monkeypatch):
     from app.services import ses as ses_service
     fake = FakeSES()
     monkeypatch.setattr(ses_service, "_client", lambda: fake)
-    # Invalida las cachés de cuotas y de configured (la sonda es ahora cacheada)
+    # Invalida la caché de cuotas y la caché de proceso de credenciales
     from app.workers.redis_client import get_redis
-    get_redis().delete("hj:ses:quota", "hj:ses:configured")
+    get_redis().delete("hj:ses:quota")
+    ses_service._CHAIN_CACHE["resultado"] = (False, 0.0)
     return fake
 
 

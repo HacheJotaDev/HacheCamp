@@ -401,12 +401,18 @@ def test_cuota_diaria_ses_clasificada_como_reintento(fake_ses):
 
 
 def test_ses_configured_cachea_la_sonda(fake_ses, monkeypatch):
-    """ses_configured sondea AWS una vez y sirve el resto desde la caché
-    (antes: 1 GetAccount por envío con credenciales de la cadena Boto3)."""
-    from app.services import ses as ses_service
-    from app.workers.redis_client import get_redis
+    """ses_configured NO consulta AWS nunca (0 llamadas por envío).
 
-    get_redis().delete("hj:ses:configured")
+    Comportamiento V4 original: sonda GetAccount una vez, cacheada en Redis
+    (antes: 1 GetAccount por envío). Integración del hotfix de producción:
+    ya no hay sonda AWS — credenciales explícitas o cadena Boto3 con caché
+    de proceso de 60 s; la validez real se comprueba al enviar (AccessDenied
+    clasificado) y la cuota en get_sending_quota. El contrato que se
+    conserva: esta función jamás debe llamar al cliente de SES.
+    """
+    from app.services import ses as ses_service
+
+    ses_service._CHAIN_CACHE["resultado"] = (False, 0.0)
     settings.AWS_ACCESS_KEY_ID = None
     settings.AWS_SECRET_ACCESS_KEY = None
     try:
@@ -418,13 +424,22 @@ def test_ses_configured_cachea_la_sonda(fake_ses, monkeypatch):
             return real_client
 
         monkeypatch.setattr(ses_service, "_client", _contando_client)
+        # Con credenciales explícitas: True sin tocar el cliente...
+        settings.AWS_ACCESS_KEY_ID = "AKIAPRUEBA"
+        settings.AWS_SECRET_ACCESS_KEY = "secreta"
         assert ses_service.ses_configured() is True
-        assert ses_service.ses_configured() is True
-        assert ses_service.ses_configured() is True
-        assert llamadas["n"] == 1, (
-            f"la sonda se llamó {llamadas['n']} veces: la caché no funciona")
+        # ...y sin credenciales explícitas tampoco se sondea AWS:
+        settings.AWS_ACCESS_KEY_ID = None
+        settings.AWS_SECRET_ACCESS_KEY = None
+        ses_service._CHAIN_CACHE["resultado"] = (False, 0.0)
+        ses_service.ses_configured()
+        ses_service.ses_configured()
+        assert llamadas["n"] == 0, (
+            f"se llamó al cliente SES {llamadas['n']} veces: "
+            "ses_configured no debe consultar AWS")
     finally:
         settings.AWS_ACCESS_KEY_ID = None
+        ses_service._CHAIN_CACHE["resultado"] = (False, 0.0)
 
 
 # --------------------------------------------------------------------------- #

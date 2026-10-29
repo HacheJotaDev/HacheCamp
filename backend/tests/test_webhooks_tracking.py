@@ -36,8 +36,14 @@ def _ses_id_of(mid: str) -> str:
     return ses_id
 
 
-def _make_sns_notification(message: dict, msg_type: str = "Notification") -> dict:
-    """Construye una notificación SNS con firma válida (SignatureVersion 1)."""
+def _make_sns_notification(message: dict, msg_type: str = "Notification",
+                           subject: str | None = None) -> dict:
+    """Construye una notificación SNS con firma válida (SignatureVersion 1).
+
+    La cadena canónica sigue la ESPECIFICACIÓN OFICIAL de AWS: cada campo es
+    su NOMBRE seguido de su VALOR, ambos terminados en salto de línea
+    ("Verifying the signatures of Amazon SNS messages").
+    """
     from cryptography.hazmat.primitives import hashes
     from cryptography.hazmat.primitives.asymmetric import padding
 
@@ -46,25 +52,29 @@ def _make_sns_notification(message: dict, msg_type: str = "Notification") -> dic
     msg_id = str(uuid.uuid4())
     timestamp = "2026-01-01T00:00:00Z"
 
+    valores = {
+        "Message": message_str, "MessageId": msg_id, "Timestamp": timestamp,
+        "TopicArn": "arn:aws:sns:us-east-2:123456789012:hj-events", "Type": msg_type,
+        "SubscribeURL": "https://sns.us-east-2.amazonaws.com/?Action=ConfirmSubscription",
+        "Token": "tok",
+    }
     if msg_type == "Notification":
-        keys = ["Message", "MessageId", "Timestamp", "TopicArn", "Type"]
+        keys = ["Message", "MessageId"]
+        if subject is not None:
+            valores["Subject"] = subject
+            keys.append("Subject")
+        keys.extend(["Timestamp", "TopicArn", "Type"])
     else:
         keys = ["Message", "MessageId", "SubscribeURL", "Timestamp", "Token", "TopicArn", "Type"]
 
     parts = []
     for k in keys:
-        value = {
-            "Message": message_str, "MessageId": msg_id, "Timestamp": timestamp,
-            "TopicArn": "arn:aws:sns:us-east-2:123456789012:hj-events", "Type": msg_type,
-            "SubscribeURL": "https://sns.us-east-2.amazonaws.com/?Action=ConfirmSubscription",
-            "Token": "tok",
-        }[k]
-        parts.append(str(value))
+        parts.extend((k, str(valores[k])))
     canonical = "\n".join(parts) + "\n"
     signature = base64.b64encode(
         key.sign(canonical.encode(), padding.PKCS1v15(), hashes.SHA1())
     ).decode()
-    return {
+    notificacion = {
         "Type": msg_type, "MessageId": msg_id, "Message": message_str,
         "Timestamp": timestamp, "TopicArn": "arn:aws:sns:us-east-2:123456789012:hj-events",
         "SignatureVersion": "1", "Signature": signature,
@@ -72,6 +82,9 @@ def _make_sns_notification(message: dict, msg_type: str = "Notification") -> dic
         "SubscribeURL": "https://sns.us-east-2.amazonaws.com/?Action=ConfirmSubscription",
         "Token": "tok",
     }
+    if subject is not None:
+        notificacion["Subject"] = subject
+    return notificacion
 
 
 @pytest.fixture
