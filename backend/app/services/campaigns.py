@@ -76,7 +76,8 @@ def _recipients_query(db: Session, campaign: Campaign):
       inmune a contactos heredados con mayúsculas, y al no transformar la
       columna de Suppression el índice único de email sigue utilizable.
     """
-    query = db.query(Contact).filter(Contact.status == "suscripto")
+    query = db.query(Contact).filter(Contact.status == "suscripto",
+                                     Contact.deleted_at.is_(None))
 
     if campaign.list_id:
         query = query.join(contact_lists_rel, contact_lists_rel.c.contact_id == Contact.id).filter(
@@ -304,3 +305,104 @@ def cancel_campaign(db: Session, campaign: Campaign, **user) -> None:
     )
     campaign.status = target
     add_history(campaign, "cancelada", detail={"mensajes_cancelados": updated}, **user)
+
+
+# Papelera / archivo (V5) --------------------------------------------------- #
+
+ESTADOS_ACTIVOS = ("en_cola", "enviando", "pausada")
+ESTADOS_CON_POBLACION_VIVA = ("borrador", "en_revision", "programada")
+
+
+def cancel_for_delete(db: Session, campaign: Campaign, **user) -> int:
+    """Cancela la campaña antes de llevarla a la papelera.
+
+    - Marca pendientes como cancelados (los aceptados/entregados/incierto NO
+      se tocan: cualquier operación ya aceptada por SES se respeta y jamás se
+      reenvía; el worker ya ignora campañas canceladas en process_one).
+    - Quitar la programación evita que el scheduler la lance más tarde.
+    - Devuelve el número de mensajes cancelados.
+    """
+    if campaign.status in ("completada", "cancelada"):
+        return 0
+    updated = (
+        db.query(CampaignMessage)
+        .filter(CampaignMessage.campaign_id == campaign.id, CampaignMessage.status == "pendiente")
+        .update({"status": "cancelado"}, synchronize_session=False)
+    )
+    previous = campaign.status
+    campaign.status = "cancelada"
+    campaign.scheduled_at = None
+    add_history(campaign, "cancelada_por_eliminacion",
+                detail={"mensajes_cancelados": updated, "estado_anterior": previous}, **user)
+    return int(updated or 0)
+
+
+def soft_delete_campaign(db: Session, campaign: Campaign, *, user_id: Optional[str] = None,
+                         user_email: Optional[str] = None) -> int:
+    """Lleva la campaña a la Papelera (borrado lógico).
+
+    Si la campaña estaba activa se cancela antes (ningún envío queda suelto).
+    Mensajes, eventos SES, historial y estadísticas quedan intactos: el
+    borrado solo marca la fila de campaña.
+    """
+    if campaign.deleted_at is not None:
+        raise CampaignError("La campaña ya está en la papelera")
+    cancelados = cancel_for_delete(db, campaign,
+                                   user_id=user_id, user_email=user_email)
+    campaign.deleted_at = utcnow()
+    campaign.deleted_by = user_id
+    add_history(campaign, "eliminada", detail={
+        "mensajes_cancelados": cancelados,
+        "nota": "borrado lógico: los mensajes y eventos se conservan",
+    }, user_id=user_id, user_email=user_email)
+    return cancelados
+
+
+def restore_campaign(db: Session, campaign: Campaign, *, user_id: Optional[str] = None,
+                     user_email: Optional[str] = None) -> None:
+    """Saca la campaña de la Papelera conservando toda su información.
+
+    Restaurar NO reanuda el envío: si estaba activa al eliminarse quedó
+    cancelada (comportamiento deliberado para no reenviar nada).
+    """
+    if campaign.deleted_at is None:
+        raise CampaignError("La campaña no está en la papelera")
+    campaign.deleted_at = None
+    campaign.deleted_by = None
+    add_history(campaign, "restaurada", user_id=user_id, user_email=user_email)
+
+
+def archive_campaign(db: Session, campaign: Campaign, *, user_id: Optional[str] = None,
+                     user_email: Optional[str] = None) -> None:
+    if campaign.deleted_at is not None:
+        raise CampaignError("No se puede archivar una campaña eliminada; restáurala primero")
+    if campaign.archived_at is not None:
+        raise CampaignError("La campaña ya está archivada")
+    campaign.archived_at = utcnow()
+    add_history(campaign, "archivada", user_id=user_id, user_email=user_email)
+
+
+def unarchive_campaign(db: Session, campaign: Campaign, *, user_id: Optional[str] = None,
+                       user_email: Optional[str] = None) -> None:
+    if campaign.archived_at is None:
+        raise CampaignError("La campaña no está archivada")
+    campaign.archived_at = None
+    add_history(campaign, "desarchivada", user_id=user_id, user_email=user_email)
+
+
+def campaigns_query(db: Session, *, papelera: bool = False,
+                    incluir_archivadas: bool = True):
+    """Consulta base de campañas para el listado.
+
+    - Papelera desactivada (defecto): excluye las eliminadas.
+    - papelera=True: SOLO eliminadas.
+    Las archivadas siguen en el listado (con su fecha) salvo que se pida lo
+    contrario: eliminarlas de la vista rompería la búsqueda del histórico.
+    """
+    query = db.query(Campaign)
+    if papelera:
+        return query.filter(Campaign.deleted_at.isnot(None))
+    query = query.filter(Campaign.deleted_at.is_(None))
+    if not incluir_archivadas:
+        query = query.filter(Campaign.archived_at.is_(None))
+    return query

@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from app.core import security
@@ -54,6 +54,15 @@ def _validate_campaign_content(mode: str, blocks, html) -> None:
 
 
 def _get_campaign(db: Session, campaign_id: str) -> Campaign:
+    """Campaña visible (no eliminada). Para la papelera usa _get_campaign_any."""
+    campaign = _get_campaign_any(db, campaign_id)
+    if campaign.deleted_at is not None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Campaña no encontrada")
+    return campaign
+
+
+def _get_campaign_any(db: Session, campaign_id: str) -> Campaign:
+    """Campaña esté o no en la papelera (uso exclusivo papelera/restaurar)."""
     campaign = db.get(Campaign, campaign_id)
     if not campaign:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Campaña no encontrada")
@@ -62,14 +71,24 @@ def _get_campaign(db: Session, campaign_id: str) -> Campaign:
 
 @router.get("", response_model=dict)
 def list_campaigns(db: Session = Depends(get_db), user: User = Depends(get_current_user),
-                   estado: Optional[str] = None, page: int = Query(1, ge=1),
+                   estado: Optional[str] = None, q: Optional[str] = None,
+                   papelera: bool = False, page: int = Query(1, ge=1),
                    per_page: int = Query(20, ge=1, le=100)):
-    query = db.query(Campaign)
+    """Listado de campañas. Por defecto excluye la papelera; con `papelera=true`
+    devuelve SOLO las eliminadas. Búsqueda por nombre/asunto con `q`."""
+    query = campaign_service.campaigns_query(db, papelera=papelera)
     if estado:
         query = query.filter(Campaign.status == estado)
+    if q:
+        like = f"%{q}%"
+        query = query.filter(or_(Campaign.name.ilike(like), Campaign.subject.ilike(like)))
     total = query.count()
     items = query.order_by(Campaign.created_at.desc()).offset((page - 1) * per_page).limit(per_page).all()
-    counts = dict(db.query(Campaign.status, func.count(Campaign.id)).group_by(Campaign.status).all())
+    counts = dict(
+        db.query(Campaign.status, func.count(Campaign.id))
+        .filter(Campaign.deleted_at.is_(None) if not papelera else Campaign.deleted_at.isnot(None))
+        .group_by(Campaign.status).all()
+    )
     return {
         "total": total, "page": page, "per_page": per_page,
         "por_estado": counts,
@@ -165,6 +184,17 @@ def queue_active(db: Session = Depends(get_db), user: User = Depends(get_current
             "ultimo_error": (ultimo_error.last_error[:200] if ultimo_error and ultimo_error.last_error else None),
         })
     return {"items": items, "actualizado": ahora.isoformat()}
+
+
+@router.get("/papelera", response_model=dict)
+def papelera_resumen(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Resumen de la papelera de campañas (para el badge del panel).
+
+    Ruta estática: DEBE declararse antes que /{campaign_id} para que FastAPI
+    no interprete «papelera» como un id de campaña.
+    """
+    total = db.query(func.count(Campaign.id)).filter(Campaign.deleted_at.isnot(None)).scalar() or 0
+    return {"total": total}
 
 
 @router.get("/scheduled/upcoming", response_model=dict)
@@ -368,6 +398,84 @@ def duplicate_campaign(campaign_id: str, request: Request, db: Session = Depends
     db.commit()
     db.refresh(copy)
     return copy
+
+
+# Papelera / archivo ----------------------------------------------------------- #
+
+
+@router.delete("/{campaign_id}", response_model=dict)
+def delete_campaign(campaign_id: str, request: Request,
+                    db: Session = Depends(get_db), user: User = Depends(require_admin),
+                    confirmar: bool = Query(False)):
+    """Lleva la campaña a la PAPELERA (borrado lógico, requiere admin).
+
+    - Si estaba activa (en_cola/enviando/pausada) o programada se cancela
+      antes: los pendientes quedan cancelados y NINGÚN envío aceptado por SES
+      se reenvía ni se toca.
+    - Mensajes, eventos SES, historial y estadísticas se conservan íntegros.
+    - Exige `?confirmar=true`; el panel además pide confirmación al usuario.
+    """
+    campaign = _get_campaign(db, campaign_id)
+    if not confirmar:
+        raise HTTPException(status.HTTP_409_CONFLICT,
+                            "Falta confirmación (?confirmar=true) para eliminar la campaña")
+    cancelados = campaign_service.soft_delete_campaign(
+        db, campaign, user_id=user.id, user_email=user.email)
+    audit(db, "campana_eliminada", user_id=user.id, user_email=user.email,
+          entity_type="campaign", entity_id=campaign.id,
+          detail={"mensajes_cancelados": cancelados, "estado": campaign.status},
+          ip=security.client_ip(request))
+    db.commit()
+    return {"estado": campaign.status, "papelera": True,
+            "mensajes_cancelados": cancelados}
+
+
+@router.post("/{campaign_id}/restore", response_model=dict)
+def restore_campaign(campaign_id: str, request: Request,
+                     db: Session = Depends(get_db), user: User = Depends(require_admin)):
+    """Restaura una campaña desde la papelera conservando toda su información.
+
+    Restaurar NO reanuda envíos: la campaña restaurada conserva el estado que
+    tenía al eliminarse (p. ej. cancelada).
+    """
+    campaign = _get_campaign_any(db, campaign_id)
+    try:
+        campaign_service.restore_campaign(db, campaign, user_id=user.id, user_email=user.email)
+    except campaign_service.CampaignError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc))
+    audit(db, "campana_restaurada", user_id=user.id, user_email=user.email,
+          entity_type="campaign", entity_id=campaign.id, ip=security.client_ip(request))
+    db.commit()
+    return {"estado": campaign.status, "restaurada": True}
+
+
+@router.post("/{campaign_id}/archive", response_model=dict)
+def archive_campaign(campaign_id: str, request: Request,
+                     db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """Archiva la campaña (sigue en el listado con su badge, fuera del ruido)."""
+    campaign = _get_campaign(db, campaign_id)
+    try:
+        campaign_service.archive_campaign(db, campaign, user_id=user.id, user_email=user.email)
+    except campaign_service.CampaignError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc))
+    audit(db, "campana_archivada", user_id=user.id, user_email=user.email,
+          entity_type="campaign", entity_id=campaign.id, ip=security.client_ip(request))
+    db.commit()
+    return {"estado": campaign.status, "archivada": True}
+
+
+@router.post("/{campaign_id}/unarchive", response_model=dict)
+def unarchive_campaign(campaign_id: str, request: Request,
+                       db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    campaign = _get_campaign(db, campaign_id)
+    try:
+        campaign_service.unarchive_campaign(db, campaign, user_id=user.id, user_email=user.email)
+    except campaign_service.CampaignError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc))
+    audit(db, "campana_desarchivada", user_id=user.id, user_email=user.email,
+          entity_type="campaign", entity_id=campaign.id, ip=security.client_ip(request))
+    db.commit()
+    return {"estado": campaign.status, "archivada": False}
 
 
 # Acciones de estado ------------------------------------------------------------ #
